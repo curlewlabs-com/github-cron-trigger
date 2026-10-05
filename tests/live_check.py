@@ -31,8 +31,11 @@ workflow does not carry is refused, and the missed-slot check reads everything.
 THE CLOCKS. Two clock processes tick this repository with --send at the same
 moment, as two hosts would, against clock-check.yml, a workflow enrolled for
 this. With no marks, they baseline its newest slot once and send nothing; with
-an older slot marked, exactly one of them sends the newest. The marks live in
-the repository (clock_marks.py), and are removed again whatever the outcome.
+an older slot marked, exactly one of them sends the newest. Marking that older
+slot checks the claim itself: a claim made twice holds the mark it made, as a
+retried create that applied must, and a different claim of it does not. The
+marks live in the repository (clock_marks.py), and are removed again whatever
+the outcome.
 """
 
 import argparse
@@ -311,11 +314,19 @@ def clocks(repo: str, required: bool) -> None:
         "two clocks baselining at once mark the newest slot once and send nothing",
     )
     MARKS.remove(repo, _clock_marks(repo))
-    MARKS.claim(
-        repo,
-        mark_for(
-            CLOCK_CHECK, YEARLY, latest_slot(YEARLY, newest - timedelta(minutes=1))
-        ),
+    older = mark_for(
+        CLOCK_CHECK, YEARLY, latest_slot(YEARLY, newest - timedelta(minutes=1))
+    )
+    # The same claim made twice is what a retried create that applied looks
+    # like; holding the mark rests on its note hashing to the blob GitHub made.
+    retried = GitHubMarks(claim_id=lambda: f"live-check-{os.getpid()}")
+    _expect(
+        retried.claim(repo, older) and retried.claim(repo, older),
+        "a claim refused by its own earlier create holds the mark",
+    )
+    _expect(
+        not MARKS.claim(repo, older),
+        "a claim of a mark another claim made is not held",
     )
     outputs = _concurrent_ticks(repo)
     _expect(

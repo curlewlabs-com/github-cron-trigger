@@ -6,8 +6,10 @@ nothing listens for) or missed when it is (it would never be delivered on
 time); a first tick, or the first tick after an enrollment, that dispatches a
 slot the workflow ran before it could record it; a wake after a long sleep that
 bursts every missed slot; two clocks ticking at once that both send a slot; a
-failed send that leaves its slot marked, so no clock retries it; and clean-up
-that removes the marks a line needs. They also pin the refusal of a slot-action
+failed send or ledger read that leaves its slot marked, so no clock retries it;
+a claim GitHub applied but answered as failed or refused, read as another
+clock's, which strands the slot the same way; and clean-up that removes the
+marks a line needs. They also pin the refusal of a slot-action
 workflow enrolled on a line firing more than once a day, whose every backstop
 run would fail. Workflow files are real YAML read through the same reader the
 clock uses, not hand-built mappings of what a parser returns. The repository's
@@ -18,7 +20,7 @@ as GitHub's ref creates are. Every instant is hardcoded.
 import contextlib
 import io
 import unittest
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -31,13 +33,14 @@ from github_cron_trigger.clock import (
     stale_marks,
     tick,
 )
-from github_cron_trigger.clock_marks import Mark, mark_for
+from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for
 from github_cron_trigger.cron_slots import (
     UTC,
     CronSchedule,
     UnsupportedCron,
     parse_cron,
 )
+from github_cron_trigger.default_branch import git_blob_id
 from github_cron_trigger.github import GitHubError
 from github_cron_trigger.workflow_triggers import MisconfiguredWorkflow
 
@@ -326,10 +329,12 @@ class FakeRemote:
         marks: Iterable[Mark] = (),
         done: Iterable[datetime] = (),
         failing_dispatches: int = 0,
+        failing_done_reads: int = 0,
     ) -> None:
         self.marks = set(marks)
         self.done = set(done)
         self.failing_dispatches = failing_dispatches
+        self.failing_done_reads = failing_done_reads
         self.dispatched: list[tuple[str, datetime]] = []
         self.snapshot: list[Mark] | None = None
 
@@ -353,6 +358,9 @@ class FakeRemote:
     def is_done(
         self, repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
     ) -> bool:
+        if self.failing_done_reads:
+            self.failing_done_reads -= 1
+            raise GitHubError("gh: Server Error (HTTP 502)")
         return slot in self.done
 
     def dispatch(
@@ -430,6 +438,22 @@ class TickTest(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
 
+    def test_a_failed_ledger_read_releases_its_mark_so_the_next_tick_retries(
+        self,
+    ) -> None:
+        remote = FakeRemote(
+            marked(DAILY, utc(2026, 9, 27, 19, 30)), failing_done_reads=1
+        )
+        problems, _ = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(remote.dispatched, [])
+        self.assertNotIn(
+            mark_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30)), remote.marks
+        )
+        problems, _ = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 36))
+        self.assertEqual(problems, [])
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+
     def test_a_slot_the_ledger_records_is_marked_and_not_sent(self) -> None:
         remote = FakeRemote(
             marked(DAILY, utc(2026, 9, 27, 19, 30)), done=[utc(2026, 9, 28, 19, 30)]
@@ -483,6 +507,66 @@ class TickTest(unittest.TestCase):
         problems, _ = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 31))
         self.assertEqual(len(problems), 1)
         self.assertEqual((remote.marks, remote.dispatched), (set(), []))
+
+
+class ClaimTest(unittest.TestCase):
+    """GitHub can apply a ref create and still answer otherwise: gh_api retries
+    a POST whose answer was lost, and the retry is told the ref exists; or the
+    lost answer is the last attempt's, and the call fails. Read as another
+    clock's claim, or as no claim, the mark would stay with nothing sent. The
+    refs here are a dictionary of path to blob id; the blob ids are git's."""
+
+    MARK = mark_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30))
+
+    def setUp(self) -> None:
+        self.refs: dict[str, str] = {}
+
+    def create(self, repo: str, path: str, text: str) -> bool:
+        if path in self.refs:
+            return False
+        self.refs[path] = git_blob_id(text.encode("utf-8"))
+        return True
+
+    def marks(
+        self, create: Callable[[str, str, str], bool], claim_id: str
+    ) -> GitHubMarks:
+        return GitHubMarks(
+            create=create,
+            target=lambda repo, path: self.refs.get(path),
+            claim_id=lambda: claim_id,
+        )
+
+    def test_a_retry_refused_by_its_own_create_holds_the_mark(self) -> None:
+        def retried(repo: str, path: str, text: str) -> bool:
+            self.create(repo, path, text)
+            return self.create(repo, path, text)
+
+        self.assertTrue(self.marks(retried, "a").claim(REPO, self.MARK))
+
+    def test_a_create_that_applied_but_failed_holds_the_mark(self) -> None:
+        def lost(repo: str, path: str, text: str) -> bool:
+            self.create(repo, path, text)
+            raise GitHubError("`gh api` timed out")
+
+        self.assertTrue(self.marks(lost, "a").claim(REPO, self.MARK))
+
+    def test_a_create_that_failed_without_applying_raises(self) -> None:
+        def failed(repo: str, path: str, text: str) -> bool:
+            raise GitHubError("gh: Server Error (HTTP 502)")
+
+        with self.assertRaises(GitHubError):
+            self.marks(failed, "a").claim(REPO, self.MARK)
+        self.assertEqual(self.refs, {})
+
+    def test_another_claims_mark_is_not_held_however_the_create_answers(
+        self,
+    ) -> None:
+        def failed(repo: str, path: str, text: str) -> bool:
+            raise GitHubError("gh: Server Error (HTTP 502)")
+
+        self.assertTrue(self.marks(self.create, "first").claim(REPO, self.MARK))
+        self.assertFalse(self.marks(self.create, "second").claim(REPO, self.MARK))
+        self.assertFalse(self.marks(failed, "third").claim(REPO, self.MARK))
 
 
 class MainTest(unittest.TestCase):

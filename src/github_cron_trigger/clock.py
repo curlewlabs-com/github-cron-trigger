@@ -323,26 +323,28 @@ def tick(
             print(f"clock: {what}: {verb} (dry run)")
             continue
         try:
-            if not remote.claim(repo, mark):
-                print(f"clock: {what}: claimed by another clock; not sent")
-                continue
-            if step.kind == "baseline":
-                print(
-                    f"clock: {what}: no clock has marked this line; baselined without sending"
-                )
-                continue
-            if remote.is_done(repo, workflow_file, step.schedule, step.slot):
-                print(f"clock: {what}: already recorded done; not sent")
-                continue
+            claimed = remote.claim(repo, mark)
         except (GitHubError, ValueError) as exc:
             problems.append(f"{what}: {exc}")
             continue
+        if not claimed:
+            print(f"clock: {what}: claimed by another clock; not sent")
+            continue
+        if step.kind == "baseline":
+            print(
+                f"clock: {what}: no clock has marked this line; baselined without sending"
+            )
+            continue
         try:
+            if remote.is_done(repo, workflow_file, step.schedule, step.slot):
+                print(f"clock: {what}: already recorded done; not sent")
+                continue
             remote.dispatch(repo, workflow_file, step.schedule, step.slot)
         except (GitHubError, ValueError) as exc:
-            # The mark comes off again, so the next tick on any host sends the
-            # slot. A ValueError is a name no retry fixes; it is reported on
-            # every tick.
+            # The ledger read or the send failed, so the mark comes off again
+            # and the next tick on any host tries the slot; left on, it would
+            # read as sent. A ValueError is a name no retry fixes; it is
+            # reported on every tick.
             problems.append(f"{what}: {exc}")
             try:
                 remote.release(repo, mark)

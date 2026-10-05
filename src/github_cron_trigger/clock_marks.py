@@ -5,7 +5,8 @@ One git ref per slot a clock claimed:
     refs/github-cron-trigger-clock/<workflow file>/<cron line>/<YYYYMMDDTHHMMZ>
 
 in the ledger's own encoding (slot_ledger.py), pointing at a blob that says
-which slot it marks. Nothing reads what a mark points at.
+which slot it marks and which claim made it. Only the claim that made a mark
+reads what it points at (GitHubMarks.claim).
 
 WHY IN THE REPOSITORY. Kept on the host, a clock's memory ties delivery to that
 one host: while it sleeps every slot waits for GitHub's backstop, and a second
@@ -16,10 +17,14 @@ can be read from the repository it describes.
 WHY A CLAIM BEFORE THE SEND. Creating a ref is atomic: of the clocks that
 create the same mark, exactly one succeeds and the rest are told it already
 exists. A clock sends only after its create succeeded, so each slot is sent by
-one clock however many tick at once. A send that fails releases its mark, so
-the next tick on any host tries the slot again. A clock stopped between its
-claim and its send leaves a slot marked and not sent; GitHub's schedule still
-delivers that one, late.
+one clock however many tick at once. A send that fails, or the ledger read
+before it, releases its mark, so the next tick on any host tries the slot
+again. A create can apply and still answer otherwise - a retried POST is told
+its own ref exists, or the answer to the one that applied is lost - so a claim
+that is refused or fails reads the mark, and holds it when the mark points at
+its own blob. A clock stopped between its claim and its send, or one that can
+neither create nor read the mark, leaves a slot marked and not sent; GitHub's
+schedule still delivers that one, late.
 
 This is not the slot ledger. The ledger records slots whose work finished,
 whichever delivery did it, and the slot action reads it; marks record slots a
@@ -28,12 +33,15 @@ read them.
 """
 
 import re
-from collections.abc import Iterable
+import secrets
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
 from .cron_slots import CronSchedule, format_slot, ledger_key, parse_ledger_key
-from .slot_ledger import create_ref, cron_segment, delete_ref, list_refs
+from .default_branch import git_blob_id
+from .github import GitHubError
+from .slot_ledger import create_ref, cron_segment, delete_ref, list_refs, ref_target
 
 MARK_NAMESPACE = "github-cron-trigger-clock"
 
@@ -85,14 +93,34 @@ def parse_mark(name: str) -> Mark | None:
     return Mark(match.group("file"), match.group("segment"), slot)
 
 
-def note(mark: Mark) -> str:
-    """The text of a mark's blob. It names the slot and nothing about the host,
-    since a public repository's refs are readable by anyone."""
-    return f"github-cron-trigger clock: claimed {mark.workflow_file} slot {format_slot(mark.slot)}\n"
+def note(mark: Mark, claim_id: str) -> str:
+    """The text of a mark's blob. It names the slot, and the claim by a random
+    id, so its blob is that claim's alone; nothing about the host, since a
+    public repository's refs are readable by anyone."""
+    return (
+        f"github-cron-trigger clock: claimed {mark.workflow_file}"
+        f" slot {format_slot(mark.slot)} (claim {claim_id})\n"
+    )
+
+
+def new_claim_id() -> str:
+    return secrets.token_hex(16)
 
 
 class GitHubMarks:
-    """Marks read and written through the GitHub API."""
+    """Marks read and written through the GitHub API. The ref calls and the
+    claim id are parameters so a test can replay a create that applied but
+    answered otherwise."""
+
+    def __init__(
+        self,
+        create: Callable[[str, str, str], bool] = create_ref,
+        target: Callable[[str, str], str | None] = ref_target,
+        claim_id: Callable[[], str] = new_claim_id,
+    ) -> None:
+        self._create = create
+        self._target = target
+        self._claim_id = claim_id
 
     def read(self, repo: str) -> list[Mark]:
         """Every mark the repository holds. A ref in the namespace that is not
@@ -101,8 +129,19 @@ class GitHubMarks:
         return sorted(mark for mark in marks if mark is not None)
 
     def claim(self, repo: str, mark: Mark) -> bool:
-        """Create the mark; True when this call created it."""
-        return create_ref(repo, mark.path, note(mark))
+        """Create the mark; True when this claim holds it, False when another
+        does. A create that fails without applying raises."""
+        text = note(mark, self._claim_id())
+        own = git_blob_id(text.encode("utf-8"))
+        try:
+            if self._create(repo, mark.path, text):
+                return True
+        except GitHubError:
+            target = self._target(repo, mark.path)
+            if target is None:
+                raise
+            return target == own
+        return self._target(repo, mark.path) == own
 
     def release(self, repo: str, mark: Mark) -> None:
         delete_ref(repo, mark.path)
