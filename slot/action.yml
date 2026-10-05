@@ -1,0 +1,82 @@
+# Decide which scheduled slot this run belongs to, and whether that slot is
+# still owed.
+#
+# An enrolled workflow is delivered each slot twice: on time by the clock
+# (`repository_dispatch`), and later by GitHub's own `schedule`, kept as the
+# backstop. Whichever delivery arrives second must find the work already done
+# and skip it, and a manual or pull request run must behave exactly as it did
+# before enrollment. This action is that decision; the README has the contract.
+#
+# The enrolling workflow must serialize its scheduled runs with a concurrency
+# group: this check and the record the done action writes are separate calls,
+# so deliveries of one slot running side by side could each find it owed.
+#
+# Runs the code beside it, so the workflow needs no checkout. Needs python3
+# (3.10 or newer) and `gh` on the runner, and for a scheduled delivery, which
+# parses a workflow file, mikefarah's yq on PATH (the README's "Requirements").
+
+name: "github-cron-trigger slot"
+description: >-
+  Resolve the cron line and scheduled slot a run belongs to - from a
+  repository_dispatch payload, the schedule event, or a workflow_run's
+  scheduled parent - and read the slot ledger to report whether the slot is
+  still owed. Manual and pull request runs report scheduled=false and run=true.
+
+inputs:
+  github-token:
+    description: "Token that can read the repository's contents and git refs (contents: read)."
+    required: false
+    default: ${{ github.token }}
+  part:
+    description: "Optional record part, for a run whose legs are recorded separately."
+    required: false
+    default: ""
+
+outputs:
+  scheduled:
+    description: "'true' for a scheduled delivery (schedule, repository_dispatch, or a workflow_run from a scheduled parent), otherwise 'false'."
+    value: ${{ steps.resolve.outputs.scheduled }}
+  slot:
+    description: "The slot as YYYY-MM-DDTHH:MMZ, or empty when the run is not a scheduled delivery."
+    value: ${{ steps.resolve.outputs.slot }}
+  cron:
+    description: "The cron line the slot belongs to, in canonical form, or empty when the run is not a scheduled delivery."
+    value: ${{ steps.resolve.outputs.cron }}
+  run:
+    description: "'false' when the ledger already records this slot done, otherwise 'true'."
+    value: ${{ steps.resolve.outputs.run }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve slot
+      id: resolve
+      shell: sh
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ACTION_PATH: ${{ github.action_path }}
+        EVENT_NAME: ${{ github.event_name }}
+        PAYLOAD_SLOT: ${{ github.event.client_payload.slot }}
+        PAYLOAD_CRON: ${{ github.event.client_payload.cron }}
+        SCHEDULE_CRON: ${{ github.event.schedule }}
+        PARENT_PATH: ${{ github.event.workflow_run.path }}
+        PARENT_SHA: ${{ github.event.workflow_run.head_sha }}
+        PARENT_EVENT: ${{ github.event.workflow_run.event }}
+        PARENT_CREATED_AT: ${{ github.event.workflow_run.created_at }}
+        PART: ${{ inputs.part }}
+      run: |
+        PYTHONPATH="$ACTION_PATH/../src" exec python3 -m github_cron_trigger slot \
+          --repo "$GITHUB_REPOSITORY" \
+          --workflow-ref "$GITHUB_WORKFLOW_REF" \
+          --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+          --event-name "$EVENT_NAME" \
+          --payload-slot "$PAYLOAD_SLOT" \
+          --payload-cron "$PAYLOAD_CRON" \
+          --schedule-cron "$SCHEDULE_CRON" \
+          --parent-path "$PARENT_PATH" \
+          --parent-sha "$PARENT_SHA" \
+          --parent-event "$PARENT_EVENT" \
+          --parent-created-at "$PARENT_CREATED_AT" \
+          --part "$PART" \
+          --github-output "$GITHUB_OUTPUT" \
+          --step-summary "$GITHUB_STEP_SUMMARY"

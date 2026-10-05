@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/curlewlabs-com/github-cron-trigger/security/advisories/new
+    about: >-
+      Anything about the tokens the actions and the clock hold, what a dispatch
+      payload can make a run do, or which yq the tool runs - report
+      these privately here, not as a public issue.

@@ -1,0 +1,118 @@
+name: CI
+
+# Every pull request and push to main runs the checks a contributor runs
+# locally, plus the live check against GitHub's API. The weekly run catches
+# what changes outside this repository - the API, the runner images and the
+# yq they carry - before a user's scheduled run does; it also gives the
+# live check a schedule line of this workflow's own to resolve.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install the pinned tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: ruff format
+        run: ruff format --check .
+      - name: ruff check
+        run: ruff check .
+      - name: mypy (strict)
+        run: mypy
+
+  test:
+    # The oldest Python the package supports, and the python3 and yq each
+    # runner image ships, on Linux x86_64 and arm64 and on macOS.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            python: "3.10"
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+          - runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - if: matrix.python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -t . -v
+
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Run actionlint
+        # The installer script is pinned to the commit of actionlint's v1.7.12
+        # tag rather than its main branch, and fetches that version's binary.
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) 1.7.12
+          ./actionlint -color
+
+  live:
+    # Writes and deletes git refs, so it needs a token that can; a pull
+    # request from a fork gets a read-only one and skips this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    # Holds the full retry ladder of a failing `gh` call (github.py's
+    # GH_TIMEOUT_SECONDS and RETRY_DELAYS_SECONDS) for the check and again for
+    # its cleanup, so an API outage ends in a failed step with its message
+    # rather than a job cancelled at the cap. The healthy path takes seconds.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Slot action, as an enrolled workflow runs it
+        id: slot
+        uses: ./slot
+
+      - name: Only this workflow's schedule run is a scheduled delivery
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULED: ${{ steps.slot.outputs.scheduled }}
+          SLOT: ${{ steps.slot.outputs.slot }}
+          RUN: ${{ steps.slot.outputs.run }}
+        run: |
+          expected=false
+          if [ "$EVENT_NAME" = schedule ]; then expected=true; fi
+          if [ "$SCHEDULED" != "$expected" ] || [ "$RUN" != true ]; then
+            echo "::error::$EVENT_NAME run: expected scheduled=$expected run=true, got scheduled=$SCHEDULED run=$RUN"
+            exit 1
+          fi
+          echo "ok: a $EVENT_NAME run is scheduled=$SCHEDULED slot=$SLOT and proceeds"
+
+      - name: Live check against the GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECORD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 -m tests.live_check \
+            --repo "$GITHUB_REPOSITORY" \
+            --sha "$RECORD_SHA" \
+            --workflow-file "ci-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.yml" \
+            --workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --workflow-sha "$GITHUB_WORKFLOW_SHA"

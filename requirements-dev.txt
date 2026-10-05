@@ -1,0 +1,10 @@
+# The lint and type-check tools CI runs, and everything they install, each at
+# an exact version so a resolver cannot move them. Nothing here is a runtime
+# dependency: the package itself runs on the standard library.
+ast-serialize==0.12.1
+librt==0.16.0
+mypy==2.3.1
+mypy-extensions==1.1.0
+pathspec==1.1.1
+ruff==0.16.8
+typing-extensions==4.16.0

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["flit_core==4.1.0"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "github-cron-trigger"
+version = "0.1.0"
+description = "Run each scheduled slot of a GitHub Actions workflow on time and exactly once, with GitHub's schedule as the backstop."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Curlew Labs" }]
+# The python3 of the oldest supported hosted runner image; the package's
+# __init__ refuses anything older with a message.
+requires-python = ">=3.10"
+# Nothing: the package runs on the standard library, plus the `gh` CLI and
+# mikefarah's yq on PATH (README "Requirements").
+dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Topic :: Software Development :: Build Tools",
+]
+
+[project.scripts]
+github-cron-trigger = "github_cron_trigger.__main__:main"
+
+[project.urls]
+Repository = "https://github.com/curlewlabs-com/github-cron-trigger"
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = "src"
+files = ["src", "tests"]

@@ -1,0 +1,51 @@
+# Record a scheduled slot done in the ledger, so the other delivery of the same
+# slot skips its work.
+#
+# Run it only after the slot's work succeeded: a slot left unrecorded is the
+# signal that lets the other delivery do the work instead. The record is a git
+# ref, so the token needs `contents: write`. The README has the contract.
+#
+# Runs the code beside it, so the job needs no checkout. Needs python3 (3.10 or
+# newer) and `gh` on the runner.
+
+name: "github-cron-trigger done"
+description: >-
+  Record the given slot done in the slot ledger (a git ref under
+  refs/github-cron-trigger/), and prune this workflow's records past the
+  retention window.
+
+inputs:
+  github-token:
+    description: "Token that can create git refs in the repository (contents: write)."
+    required: false
+    default: ${{ github.token }}
+  slot:
+    description: "The slot output of the slot action for this run."
+    required: true
+  cron:
+    description: "The cron output of the slot action for this run."
+    required: true
+  part:
+    description: "Optional record part, for a run whose legs are recorded separately."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Record slot done
+      shell: sh
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ACTION_PATH: ${{ github.action_path }}
+        SLOT: ${{ inputs.slot }}
+        CRON: ${{ inputs.cron }}
+        PART: ${{ inputs.part }}
+      run: |
+        PYTHONPATH="$ACTION_PATH/../src" exec python3 -m github_cron_trigger "done" \
+          --repo "$GITHUB_REPOSITORY" \
+          --workflow-ref "$GITHUB_WORKFLOW_REF" \
+          --slot "$SLOT" \
+          --cron "$CRON" \
+          --part "$PART" \
+          --sha "$GITHUB_SHA"
