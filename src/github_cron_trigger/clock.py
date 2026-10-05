@@ -1,24 +1,29 @@
 """The clock: deliver each workflow's due scheduled slots on time.
 
 Run on a short interval by a scheduler outside GitHub (launchd, a systemd
-timer, any cron). Each tick reads the workflow files of the repository's
-default branch through the API, so the host needs no clone of it; works out for
-every `cron:` line the latest slot that has come due; and sends a
-`repository_dispatch` of that slot to the workflow when it is enrolled and the
-slot has not been delivered yet. GitHub's own `schedule` stays as the backstop;
-the slot action and the ledger make every delivery of one slot do its work
-once (README.md).
+timer, any cron), on as many hosts as you like. Each tick reads the workflow
+files of the repository's default branch through the API, so the host needs no
+clone of it; works out for every enrolled `cron:` line the latest slot that has
+come due; and sends a `repository_dispatch` of that slot to the workflow when no
+clock has sent it yet. GitHub's own `schedule` stays as the backstop; the slot
+action and the ledger make every delivery of one slot do its work once
+(README.md).
 
 WHAT IT SENDS, AND WHEN. Per cron line, the newest due slot only: after a sleep
 the clock sends one delivery for a line, never a burst, and a slot it slept
-through entirely is left to GitHub's backstop. A line is baselined - its current
-latest slot is marked as handled without sending - when the clock sees it for
-the first time, and when its workflow's enrollment has changed since the line
-was last handled (the host slept across the merge that enrolled it, say).
-Either way the slot may have come due while nothing could record it: the
-workflow may already have run it, before the clock was watching or before it
+through entirely is left to GitHub's backstop. A line with no mark at all
+(clock_marks.py) is baselined - its current latest slot is marked without
+sending - because that slot may have come due while nothing could record it:
+the workflow may already have run it, before any clock served it or before it
 carried the slot action, and with no ledger record of that run a dispatch would
-repeat finished work.
+repeat finished work. A workflow that stops being enrolled has its marks
+removed, so enrolling it again baselines it again (a host asleep across the
+merge that enrolled it, say, sends nothing that predates the enrollment).
+
+WHO SENDS. Every decision is made against the marks in the repository, not
+anything on the host, and a slot is sent only by the clock whose claim of it
+succeeded. So two hosts ticking the same repository at once send each slot
+once, and a host can join, leave or be rebuilt without carrying anything over.
 
 ENROLLED means the workflow declares `repository_dispatch` with the type
 `github-cron-trigger/<its own file name>`. An enrolled workflow that runs the
@@ -26,37 +31,29 @@ slot action must fire each line at most once a day: the slot action refuses a
 `schedule` delivery of any other line, so GitHub's backstop run of such a
 workflow would fail every time, and the clock reports it rather than delivering
 it. One without the slot action - a reconciler, for which a repeated run is
-harmless - may fire more often, since each dispatch names its exact slot. Every
-other scheduled workflow is tracked too, and in shadow mode each line's due
-slots are logged for all of them, which is how the slot math is checked against
-GitHub's own schedule before anything is sent.
+harmless - may fire more often, since each dispatch names its exact slot.
 
-STATE is a local JSON file holding, per line, the last slot handled and whether
-the line's workflow was enrolled then. It only decides what to send next;
-losing it re-baselines every line, which sends nothing, so it is a cache rather
-than a record.
+A DRY RUN (no `--send`) reads everything a tick reads and reports what it would
+do, and writes nothing: no mark, no dispatch, no clean-up.
 """
 
 import argparse
-import json
-import os
-import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from . import slot_ledger, workflow_files, yq
+from .clock_marks import KEEP_PER_LINE, GitHubMarks, Mark, mark_for
 from .cron_slots import (
     UTC,
     CronSchedule,
     UnsupportedCron,
     format_slot,
     latest_slot,
-    parse_slot,
 )
 from .github import GitHubError, check_repo, gh_api
+from .slot_ledger import cron_segment
 from .workflow_triggers import (
     MisconfiguredWorkflow,
     dispatch_types,
@@ -160,24 +157,61 @@ def scheduled_workflow(
     return ScheduledWorkflow(workflow_file, tuple(schedules), enrolled)
 
 
-def state_key(workflow_file: str, schedule: CronSchedule) -> str:
-    return f"{workflow_file} {schedule.canonical}"
+class Remote(Protocol):
+    """What a tick reads and writes outside the host: the repository's marks,
+    its slot ledger, and its dispatches. GitHubRemote is the real one."""
+
+    def read_marks(self, repo: str) -> list[Mark]: ...
+
+    def claim(self, repo: str, mark: Mark) -> bool: ...
+
+    def release(self, repo: str, mark: Mark) -> None: ...
+
+    def remove(self, repo: str, marks: Iterable[Mark]) -> None: ...
+
+    def is_done(
+        self, repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
+    ) -> bool: ...
+
+    def dispatch(
+        self, repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
+    ) -> None: ...
 
 
-@dataclass(frozen=True)
-class Handled:
-    """The last slot a tick handled for one line, and whether the line's
-    workflow was enrolled at the time."""
+class GitHubRemote(GitHubMarks):
+    """The repository through the GitHub API."""
 
-    slot: datetime
-    enrolled: bool
+    def read_marks(self, repo: str) -> list[Mark]:
+        return self.read(repo)
+
+    def is_done(
+        self, repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
+    ) -> bool:
+        return slot_ledger.is_done(repo, workflow_file, schedule, slot)
+
+    def dispatch(
+        self, repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
+    ) -> None:
+        """Send one slot to one workflow as a repository_dispatch."""
+        gh_api(
+            [
+                "--method",
+                "POST",
+                f"repos/{check_repo(repo)}/dispatches",
+                "-f",
+                f"event_type={EVENT_TYPE_PREFIX}{workflow_file}",
+                "-f",
+                f"client_payload[slot]={format_slot(slot)}",
+                "-f",
+                f"client_payload[cron]={schedule.canonical}",
+            ]
+        )
 
 
 @dataclass(frozen=True)
 class Step:
-    """What a tick owes one cron line: `baseline` a line seen for the first
-    time or since its workflow's enrollment changed, or `deliver` its newest
-    slot."""
+    """What a tick owes one enrolled cron line: `baseline` a line no clock has
+    marked, or `deliver` its newest slot."""
 
     workflow: ScheduledWorkflow
     schedule: CronSchedule
@@ -185,140 +219,147 @@ class Step:
     kind: Literal["baseline", "deliver"]
 
 
+def newest_marks(marks: Iterable[Mark]) -> dict[tuple[str, str], datetime]:
+    """The newest marked slot of each line, keyed (workflow file, segment)."""
+    newest: dict[tuple[str, str], datetime] = {}
+    for mark in marks:
+        key = (mark.workflow_file, mark.segment)
+        if key not in newest or newest[key] < mark.slot:
+            newest[key] = mark.slot
+    return newest
+
+
 def plan(
-    workflows: list[ScheduledWorkflow], state: Mapping[str, Handled], now: datetime
+    workflows: Sequence[ScheduledWorkflow], marks: Iterable[Mark], now: datetime
 ) -> list[Step]:
-    """The lines whose newest slot this tick owes a step, in workflow order."""
+    """The enrolled lines whose newest slot this tick owes a step, in workflow
+    order."""
+    newest = newest_marks(marks)
     steps: list[Step] = []
     for workflow in workflows:
+        if not workflow.enrolled:
+            continue
         for schedule in workflow.schedules:
             slot = latest_slot(schedule, now)
-            last = state.get(state_key(workflow.workflow_file, schedule))
-            if last is None or last.enrolled != workflow.enrolled:
+            last = newest.get((workflow.workflow_file, cron_segment(schedule)))
+            if last is None:
                 steps.append(Step(workflow, schedule, slot, "baseline"))
-            elif last.slot < slot:
+            elif last < slot:
                 steps.append(Step(workflow, schedule, slot, "deliver"))
     return steps
 
 
-def _read_handled(value: object) -> Handled:
-    if not isinstance(value, Mapping):
-        raise TypeError(f"entry {value!r} is not a map")
-    slot, enrolled = value.get("slot"), value.get("enrolled")
-    if not isinstance(slot, str) or not isinstance(enrolled, bool):
-        raise TypeError(f"entry {value!r} lacks a slot string or an enrolled flag")
-    return Handled(parse_slot(slot), enrolled)
+def stale_marks(
+    workflows: Sequence[ScheduledWorkflow],
+    marks: Iterable[Mark],
+    unjudged: Collection[str] = (),
+) -> list[Mark]:
+    """The marks a tick removes: every mark of a line no enrolled workflow
+    carries any more - disenrolled, changed or deleted - and, of each line's
+    marks, all but the KEEP_PER_LINE newest.
 
-
-def load_state(path: Path) -> dict[str, Handled]:
-    """The last slot handled per line; empty for a missing or unreadable file.
-
-    An unreadable file is reported and treated as empty: every line then
-    re-baselines, which sends nothing, so the safe reading of a lost state is
-    no state.
+    A workflow file in `unjudged` - present, but unreadable or misconfigured
+    this tick - keeps every mark: removing them would make its lines baseline,
+    not deliver, once the file reads again.
     """
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise TypeError("not a JSON object")
-        return {key: _read_handled(value) for key, value in raw.items()}
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError, TypeError) as exc:
-        print(f"clock: state file {path} unreadable ({exc}); re-baselining every line")
-        return {}
-
-
-def save_state(path: Path, state: Mapping[str, Handled]) -> None:
-    """Write the state atomically, so a crash mid-write leaves the old file."""
-    serialized = {
-        key: {"slot": format_slot(handled.slot), "enrolled": handled.enrolled}
-        for key, handled in sorted(state.items())
+    current = {
+        (workflow.workflow_file, cron_segment(schedule))
+        for workflow in workflows
+        if workflow.enrolled
+        for schedule in workflow.schedules
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".state-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(serialized, handle, indent=2)
-            handle.write("\n")
-        os.replace(temporary, path)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
-
-
-def dispatch(
-    repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
-) -> None:
-    """Send one slot to one workflow as a repository_dispatch."""
-    gh_api(
-        [
-            "--method",
-            "POST",
-            f"repos/{check_repo(repo)}/dispatches",
-            "-f",
-            f"event_type={EVENT_TYPE_PREFIX}{workflow_file}",
-            "-f",
-            f"client_payload[slot]={format_slot(slot)}",
-            "-f",
-            f"client_payload[cron]={schedule.canonical}",
-        ]
-    )
+    by_line: dict[tuple[str, str], list[Mark]] = {}
+    for mark in marks:
+        if mark.workflow_file in unjudged:
+            continue
+        by_line.setdefault((mark.workflow_file, mark.segment), []).append(mark)
+    stale: list[Mark] = []
+    for line, line_marks in sorted(by_line.items()):
+        ordered = sorted(line_marks, key=lambda mark: mark.slot, reverse=True)
+        stale.extend(ordered if line not in current else ordered[KEEP_PER_LINE:])
+    return stale
 
 
 def tick(
     repo: str,
     documents: Mapping[str, object],
-    state: dict[str, Handled],
     now: datetime,
     send: bool,
+    remote: Remote,
+    unreadable: Collection[str] = (),
 ) -> list[str]:
-    """Run one tick: update `state` in place and return the problems met.
+    """Run one tick against one repository and return the problems met.
 
-    A problem with one workflow or one dispatch is reported and the rest of the
-    tick goes on; the caller turns any problem into a failed run.
+    `unreadable` names the workflow files present on the default branch that
+    could not be read or parsed. A problem with one workflow or one dispatch is
+    reported and the rest of the tick goes on; the caller turns any problem into
+    a failed run.
     """
     problems: list[str] = []
     workflows: list[ScheduledWorkflow] = []
+    unjudged = set(unreadable)
     for workflow_file, document in sorted(documents.items()):
         try:
             workflow = scheduled_workflow(workflow_file, document)
         except (MisconfiguredWorkflow, UnsupportedCron) as exc:
             problems.append(str(exc))
+            unjudged.add(workflow_file)
             continue
         if workflow is not None:
             workflows.append(workflow)
-    for step in plan(workflows, state, now):
+    try:
+        marks = remote.read_marks(repo)
+    except (GitHubError, ValueError) as exc:
+        # With no marks there is no telling what was sent; sending anyway could
+        # repeat a slot, so this tick sends nothing.
+        problems.append(f"cannot read the clock's marks: {exc}")
+        return problems
+    for step in plan(workflows, marks, now):
         workflow_file = step.workflow.workflow_file
-        key = state_key(workflow_file, step.schedule)
-        handled = Handled(step.slot, step.workflow.enrolled)
         what = f"{workflow_file} cron {step.schedule.canonical!r} slot {format_slot(step.slot)}"
-        if step.kind == "baseline":
-            reason = "first seen" if key not in state else "enrollment changed"
-            print(f"clock: {what}: {reason}; baselined without sending")
-            state[key] = handled
-            continue
+        mark = mark_for(workflow_file, step.schedule, step.slot)
         if not send:
-            enrolled = "enrolled" if step.workflow.enrolled else "not enrolled"
-            print(f"clock: {what}: would send ({enrolled}; shadow mode)")
-            state[key] = handled
-            continue
-        if not step.workflow.enrolled:
-            state[key] = handled
+            verb = "would baseline" if step.kind == "baseline" else "would send"
+            print(f"clock: {what}: {verb} (dry run)")
             continue
         try:
-            if slot_ledger.is_done(repo, workflow_file, step.schedule, step.slot):
+            if not remote.claim(repo, mark):
+                print(f"clock: {what}: claimed by another clock; not sent")
+                continue
+            if step.kind == "baseline":
+                print(
+                    f"clock: {what}: no clock has marked this line; baselined without sending"
+                )
+                continue
+            if remote.is_done(repo, workflow_file, step.schedule, step.slot):
                 print(f"clock: {what}: already recorded done; not sent")
-            else:
-                dispatch(repo, workflow_file, step.schedule, step.slot)
-                print(f"clock: {what}: sent")
+                continue
         except (GitHubError, ValueError) as exc:
-            # Left out of the state, so the next tick tries this slot again. A
-            # ValueError is the ledger refusing this workflow's file name or the
-            # repository; no retry fixes it, so it is reported every tick.
             problems.append(f"{what}: {exc}")
             continue
-        state[key] = handled
+        try:
+            remote.dispatch(repo, workflow_file, step.schedule, step.slot)
+        except (GitHubError, ValueError) as exc:
+            # The mark comes off again, so the next tick on any host sends the
+            # slot. A ValueError is a name no retry fixes; it is reported on
+            # every tick.
+            problems.append(f"{what}: {exc}")
+            try:
+                remote.release(repo, mark)
+            except (GitHubError, ValueError) as release_exc:
+                problems.append(f"{what}: releasing its mark failed: {release_exc}")
+            continue
+        print(f"clock: {what}: sent")
+    stale = stale_marks(workflows, marks, unjudged)
+    if stale and send:
+        try:
+            remote.remove(repo, stale)
+        except (GitHubError, ValueError) as exc:
+            # Housekeeping: a mark left behind only costs a listing entry, and
+            # the next tick tries again.
+            print(f"clock: removing {len(stale)} old mark(s) failed: {exc}")
+    elif stale:
+        print(f"clock: would remove {len(stale)} old mark(s) (dry run)")
     return problems
 
 
@@ -329,15 +370,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument(
-        "--state",
-        required=True,
-        type=Path,
-        help="state file, one per repository (a cache; see the README)",
-    )
-    parser.add_argument(
         "--send",
         action="store_true",
-        help="dispatch due slots to enrolled workflows (default: shadow mode, log only)",
+        help="claim and dispatch due slots (default: a dry run, which writes nothing)",
     )
     return parser
 
@@ -346,6 +381,7 @@ def main(
     argv: Sequence[str],
     now: datetime | None = None,
     load: workflow_files.Loader = workflow_files.load_default_branch,
+    remote: Remote | None = None,
 ) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -353,11 +389,11 @@ def main(
     except (GitHubError, ValueError, yq.ParserUnavailable) as exc:
         print(f"clock: cannot read any workflow of {args.repo}: {exc}")
         return 1
-    state = load_state(args.state)
     problems = [f"{name}: unreadable: {reason}" for name, reason in unreadable.items()]
     current = now if now is not None else datetime.now(UTC)
-    problems += tick(args.repo, documents, state, current, args.send)
-    save_state(args.state, state)
+    problems += tick(
+        args.repo, documents, current, args.send, remote or GitHubRemote(), unreadable
+    )
     for problem in problems:
         print(f"clock: problem: {problem}")
     return 1 if problems else 0

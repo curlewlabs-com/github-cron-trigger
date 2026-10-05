@@ -128,15 +128,25 @@ def record(
 
     True when this call created the record, False when it already existed -
     another delivery of the same slot got there first, or this call's own retry
-    found its earlier attempt applied. Either way the slot is recorded.
-
-    The blob is written first, so a failed ref create can leave it behind,
-    unreferenced and inert. Writing the same note again names the same blob,
-    which is what makes a retried call harmless.
+    found its earlier attempt applied (create_ref). Either way the slot is
+    recorded.
     """
     if not _OBJECT.match(sha):
         raise ValueError(f"commit {sha!r} is not a full object name")
-    path = ref_path(workflow_file, schedule, slot, part)
+    return create_ref(
+        repo, ref_path(workflow_file, schedule, slot, part), record_note(sha)
+    )
+
+
+def create_ref(repo: str, path: str, note: str) -> bool:
+    """Create `refs/<path>` pointing at a blob holding `note`, atomically.
+
+    True when this call created the ref, False when it already existed - another
+    caller got there first, or this call's own retry found its earlier attempt
+    applied. The blob is written first, so a failed ref create can leave it
+    behind, unreferenced and inert. Writing the same note again names the same
+    blob, which is what makes a retried call harmless.
+    """
     repo = check_repo(repo)
     blob = gh_api(
         [
@@ -144,7 +154,7 @@ def record(
             "POST",
             f"repos/{repo}/git/blobs",
             "-f",
-            f"content={record_note(sha)}",
+            f"content={note}",
             "-f",
             "encoding=utf-8",
             "--jq",
@@ -172,29 +182,8 @@ def record(
     return True
 
 
-def records(repo: str, workflow_file: str) -> list[str]:
-    """Every record one workflow holds, as `<cron line>/<leaf>`, sorted."""
-    prefix = f"refs/{REF_NAMESPACE}/{_check_workflow_file(workflow_file)}/"
-    # The trailing '/' keeps a prefix match from reaching a workflow whose name
-    # merely starts with this one.
-    out = gh_api(
-        [
-            "--paginate",
-            f"repos/{check_repo(repo)}/git/matching-refs/{prefix[len('refs/') :]}",
-            "--jq",
-            ".[].ref",
-        ]
-    )
-    return sorted(
-        line[len(prefix) :] for line in out.splitlines() if line.startswith(prefix)
-    )
-
-
-def delete(repo: str, workflow_file: str, record_name: str) -> None:
-    """Remove one record. An already-absent record is not an error."""
-    if not _RECORD.match(record_name):
-        raise ValueError(f"record {record_name!r} is not a ledger record")
-    path = f"{REF_NAMESPACE}/{_check_workflow_file(workflow_file)}/{record_name}"
+def delete_ref(repo: str, path: str) -> None:
+    """Delete `refs/<path>`. An already-absent ref is not an error."""
     try:
         gh_api(["--method", "DELETE", f"repos/{check_repo(repo)}/git/refs/{path}"])
     except HttpError as exc:
@@ -205,6 +194,40 @@ def delete(repo: str, workflow_file: str, record_name: str) -> None:
         )
         if not missing:
             raise
+
+
+def list_refs(repo: str, prefix: str) -> list[str]:
+    """Every ref under `refs/<prefix>`, as the part after the prefix, sorted.
+    `prefix` ends in '/', so a prefix match cannot reach a sibling whose name
+    merely starts with the last segment."""
+    if not prefix.endswith("/"):
+        raise ValueError(f"ref prefix {prefix!r} must end in '/'")
+    out = gh_api(
+        [
+            "--paginate",
+            f"repos/{check_repo(repo)}/git/matching-refs/{prefix}",
+            "--jq",
+            ".[].ref",
+        ]
+    )
+    full = f"refs/{prefix}"
+    return sorted(
+        line[len(full) :] for line in out.splitlines() if line.startswith(full)
+    )
+
+
+def records(repo: str, workflow_file: str) -> list[str]:
+    """Every record one workflow holds, as `<cron line>/<leaf>`, sorted."""
+    return list_refs(repo, f"{REF_NAMESPACE}/{_check_workflow_file(workflow_file)}/")
+
+
+def delete(repo: str, workflow_file: str, record_name: str) -> None:
+    """Remove one record. An already-absent record is not an error."""
+    if not _RECORD.match(record_name):
+        raise ValueError(f"record {record_name!r} is not a ledger record")
+    delete_ref(
+        repo, f"{REF_NAMESPACE}/{_check_workflow_file(workflow_file)}/{record_name}"
+    )
 
 
 def record_slot_key(record_name: str) -> str | None:

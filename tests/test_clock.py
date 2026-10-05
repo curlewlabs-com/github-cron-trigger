@@ -5,33 +5,39 @@ it loud: a workflow read as enrolled when it is not (the clock would send slots
 nothing listens for) or missed when it is (it would never be delivered on
 time); a first tick, or the first tick after an enrollment, that dispatches a
 slot the workflow ran before it could record it; a wake after a long sleep that
-bursts every missed slot; and a lost state file that sends instead of
-re-baselining. They also pin the refusal of a slot-action workflow enrolled on a
-line firing more than once a day, whose every backstop run would fail. Workflow
-files are real YAML read through the same reader the clock uses, not hand-built
-mappings of what a parser returns. Every instant is hardcoded.
+bursts every missed slot; two clocks ticking at once that both send a slot; a
+failed send that leaves its slot marked, so no clock retries it; and clean-up
+that removes the marks a line needs. They also pin the refusal of a slot-action
+workflow enrolled on a line firing more than once a day, whose every backstop
+run would fail. Workflow files are real YAML read through the same reader the
+clock uses, not hand-built mappings of what a parser returns. The repository's
+marks, ledger and dispatches are an in-memory stand-in whose claims are atomic,
+as GitHub's ref creates are. Every instant is hardcoded.
 """
 
 import contextlib
 import io
-import tempfile
 import unittest
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from github_cron_trigger import clock, workflow_files, yq
 from github_cron_trigger.clock import (
-    Handled,
     ScheduledWorkflow,
-    load_state,
     plan,
-    save_state,
     scheduled_workflow,
-    state_key,
+    stale_marks,
     tick,
 )
-from github_cron_trigger.cron_slots import UTC, UnsupportedCron, parse_cron
+from github_cron_trigger.clock_marks import Mark, mark_for
+from github_cron_trigger.cron_slots import (
+    UTC,
+    CronSchedule,
+    UnsupportedCron,
+    parse_cron,
+)
 from github_cron_trigger.github import GitHubError
 from github_cron_trigger.workflow_triggers import MisconfiguredWorkflow
 
@@ -215,64 +221,60 @@ class EnrollmentTest(unittest.TestCase):
 
 
 DAILY = ScheduledWorkflow("backup.yml", (parse_cron("30 19 * * *"),), True)
-DAILY_KEY = state_key("backup.yml", DAILY.schedules[0])
+LINE = DAILY.schedules[0]
 WEEKLY_AND_DAILY = ScheduledWorkflow(
     "two-lines.yml", (parse_cron("0 1 * * *"), parse_cron("0 1 * * 1")), True
 )
+REPO = "owner/name"
+
+
+def marked(workflow: ScheduledWorkflow, *slots: datetime, line: int = 0) -> list[Mark]:
+    return [
+        mark_for(workflow.workflow_file, workflow.schedules[line], s) for s in slots
+    ]
 
 
 class PlanTest(unittest.TestCase):
-    def test_a_line_seen_for_the_first_time_is_baselined_not_delivered(self) -> None:
-        # Its latest slot came due before the clock was watching; the workflow
+    def test_a_line_no_clock_has_marked_is_baselined_not_delivered(self) -> None:
+        # Its latest slot came due before any clock served it; the workflow
         # may already have run it, before any ledger record of it existed.
-        steps = plan([DAILY], {}, utc(2026, 9, 28, 20, 0))
+        steps = plan([DAILY], [], utc(2026, 9, 28, 20, 0))
         self.assertEqual(
             [(s.kind, s.slot) for s in steps], [("baseline", utc(2026, 9, 28, 19, 30))]
         )
 
-    def test_a_handled_slot_is_not_owed_again(self) -> None:
-        state = {DAILY_KEY: Handled(utc(2026, 9, 28, 19, 30), True)}
-        self.assertEqual(plan([DAILY], state, utc(2026, 9, 28, 23, 0)), [])
+    def test_a_marked_slot_is_not_owed_again(self) -> None:
+        marks = marked(DAILY, utc(2026, 9, 28, 19, 30))
+        self.assertEqual(plan([DAILY], marks, utc(2026, 9, 28, 23, 0)), [])
 
     def test_a_new_slot_is_delivered_when_it_comes_due(self) -> None:
-        state = {DAILY_KEY: Handled(utc(2026, 9, 27, 19, 30), True)}
-        self.assertEqual(plan([DAILY], state, utc(2026, 9, 28, 19, 29)), [])
-        steps = plan([DAILY], state, utc(2026, 9, 28, 19, 30))
+        marks = marked(DAILY, utc(2026, 9, 27, 19, 30))
+        self.assertEqual(plan([DAILY], marks, utc(2026, 9, 28, 19, 29)), [])
+        steps = plan([DAILY], marks, utc(2026, 9, 28, 19, 30))
         self.assertEqual(
             [(s.kind, s.slot) for s in steps], [("deliver", utc(2026, 9, 28, 19, 30))]
         )
 
     def test_a_long_sleep_owes_the_newest_slot_only(self) -> None:
-        # Three days asleep: one delivery of the newest slot, not a burst of
-        # every missed one; the older ones are left to GitHub's backstop.
-        state = {DAILY_KEY: Handled(utc(2026, 9, 25, 19, 30), True)}
-        steps = plan([DAILY], state, utc(2026, 9, 28, 20, 0))
+        # Three days with no clock up: one delivery of the newest slot, not a
+        # burst of every missed one; the older ones are left to GitHub's backstop.
+        marks = marked(DAILY, utc(2026, 9, 25, 19, 30))
+        steps = plan([DAILY], marks, utc(2026, 9, 28, 20, 0))
         self.assertEqual(
             [(s.kind, s.slot) for s in steps], [("deliver", utc(2026, 9, 28, 19, 30))]
         )
 
-    def test_a_line_whose_workflow_enrolled_since_it_was_handled_is_baselined(
-        self,
-    ) -> None:
-        # The clock handled the 27th's slot while the workflow was not enrolled,
-        # then slept across the merge that enrolled it. The 28th's slot may have
-        # run before that merge, without the slot action and so with no ledger
-        # record, and a dispatch would repeat it.
-        state = {DAILY_KEY: Handled(utc(2026, 9, 27, 19, 30), False)}
-        steps = plan([DAILY], state, utc(2026, 9, 28, 21, 0))
-        self.assertEqual(
-            [(s.kind, s.slot) for s in steps], [("baseline", utc(2026, 9, 28, 19, 30))]
-        )
+    def test_a_workflow_that_is_not_enrolled_is_owed_nothing(self) -> None:
+        tracked = ScheduledWorkflow("backup.yml", DAILY.schedules, False)
+        self.assertEqual(plan([tracked], [], utc(2026, 9, 28, 20, 0)), [])
 
     def test_each_line_of_a_workflow_is_tracked_on_its_own(self) -> None:
         # Monday 2026-09-28 01:00 is a slot of each line; each is owed its own
-        # delivery, and the daily line's state says nothing about the weekly's.
-        daily, monday = WEEKLY_AND_DAILY.schedules
-        state = {
-            state_key("two-lines.yml", daily): Handled(utc(2026, 9, 27, 1, 0), True),
-            state_key("two-lines.yml", monday): Handled(utc(2026, 9, 21, 1, 0), True),
-        }
-        steps = plan([WEEKLY_AND_DAILY], state, utc(2026, 9, 28, 1, 2))
+        # delivery, and the daily line's mark says nothing about the weekly's.
+        marks = marked(WEEKLY_AND_DAILY, utc(2026, 9, 27, 1, 0)) + marked(
+            WEEKLY_AND_DAILY, utc(2026, 9, 21, 1, 0), line=1
+        )
+        steps = plan([WEEKLY_AND_DAILY], marks, utc(2026, 9, 28, 1, 2))
         self.assertEqual(
             [(s.schedule.canonical, s.slot) for s in steps],
             [
@@ -285,118 +287,240 @@ class PlanTest(unittest.TestCase):
         # 18:05 Pacific on the 27th is 01:05 UTC on the 28th: the 01:00 UTC
         # line's 28th slot is due, whatever the host's own calendar says.
         line = ScheduledWorkflow("logs.yml", (parse_cron("0 1 * * *"),), True)
-        state = {
-            state_key("logs.yml", line.schedules[0]): Handled(
-                utc(2026, 9, 27, 1, 0), True
-            )
-        }
         now = datetime(2026, 9, 27, 18, 5, tzinfo=ZoneInfo("America/Los_Angeles"))
-        steps = plan([line], state, now)
+        steps = plan([line], marked(line, utc(2026, 9, 27, 1, 0)), now)
         self.assertEqual([s.slot for s in steps], [utc(2026, 9, 28, 1, 0)])
 
 
+class StaleMarksTest(unittest.TestCase):
+    def test_a_line_keeps_its_two_newest_marks(self) -> None:
+        # Two, so a clock whose send fails can release its new mark and still
+        # leave one behind to retry from.
+        marks = marked(DAILY, *(utc(2026, 9, day, 19, 30) for day in (25, 26, 27, 28)))
+        self.assertEqual(
+            [m.slot for m in stale_marks([DAILY], marks)],
+            [utc(2026, 9, 26, 19, 30), utc(2026, 9, 25, 19, 30)],
+        )
+
+    def test_a_line_no_enrolled_workflow_carries_loses_every_mark(self) -> None:
+        # Disenrolled, its cron changed, or its file deleted: enrolling it
+        # again later baselines it rather than sending.
+        marks = marked(DAILY, utc(2026, 9, 28, 19, 30))
+        disenrolled = ScheduledWorkflow("backup.yml", DAILY.schedules, False)
+        self.assertEqual(stale_marks([disenrolled], marks), marks)
+        self.assertEqual(stale_marks([], marks), marks)
+
+    def test_a_file_that_could_not_be_judged_keeps_its_marks(self) -> None:
+        # A file that failed to parse this tick is not a disenrolled one; its
+        # lines must deliver, not baseline, once it parses again.
+        marks = marked(DAILY, utc(2026, 9, 27, 19, 30), utc(2026, 9, 28, 19, 30))
+        self.assertEqual(stale_marks([], marks, unjudged={"backup.yml"}), [])
+
+
+class FakeRemote:
+    """A repository's marks, ledger and dispatches, in memory. A claim of a mark
+    that exists fails, as GitHub's ref create does."""
+
+    def __init__(
+        self,
+        marks: Iterable[Mark] = (),
+        done: Iterable[datetime] = (),
+        failing_dispatches: int = 0,
+    ) -> None:
+        self.marks = set(marks)
+        self.done = set(done)
+        self.failing_dispatches = failing_dispatches
+        self.dispatched: list[tuple[str, datetime]] = []
+        self.snapshot: list[Mark] | None = None
+
+    def read_marks(self, repo: str) -> list[Mark]:
+        if self.snapshot is not None:
+            return list(self.snapshot)
+        return sorted(self.marks)
+
+    def claim(self, repo: str, mark: Mark) -> bool:
+        if mark in self.marks:
+            return False
+        self.marks.add(mark)
+        return True
+
+    def release(self, repo: str, mark: Mark) -> None:
+        self.marks.discard(mark)
+
+    def remove(self, repo: str, marks: Iterable[Mark]) -> None:
+        self.marks.difference_update(marks)
+
+    def is_done(
+        self, repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
+    ) -> bool:
+        return slot in self.done
+
+    def dispatch(
+        self, repo: str, workflow_file: str, schedule: CronSchedule, slot: datetime
+    ) -> None:
+        if self.failing_dispatches:
+            self.failing_dispatches -= 1
+            raise GitHubError("gh: Server Error (HTTP 502)")
+        self.dispatched.append((workflow_file, slot))
+
+
+def run_tick(
+    remote: FakeRemote,
+    documents: dict[str, object],
+    now: datetime,
+    send: bool = True,
+    unreadable: Iterable[str] = (),
+) -> tuple[list[str], str]:
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        problems = tick(REPO, documents, now, send, remote, list(unreadable))
+    return problems, printed.getvalue()
+
+
 class TickTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enrolled = parsed({"backup.yml": ENROLLED})
+
+    def test_a_due_slot_is_claimed_then_sent(self) -> None:
+        remote = FakeRemote(marked(DAILY, utc(2026, 9, 27, 19, 30)))
+        problems, printed = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(problems, [])
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+        self.assertIn(
+            mark_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30)), remote.marks
+        )
+        self.assertIn(": sent", printed)
+
+    def test_two_clocks_ticking_at_once_send_a_slot_once(self) -> None:
+        # Both read the marks before either claims: the race the claim exists
+        # for. Exactly one claim succeeds, and only that clock sends.
+        remote = FakeRemote(marked(DAILY, utc(2026, 9, 27, 19, 30)))
+        remote.snapshot = remote.read_marks(REPO)
+        now = utc(2026, 9, 28, 19, 31)
+        first, _ = run_tick(remote, self.enrolled, now)
+        second, printed = run_tick(remote, self.enrolled, now)
+        self.assertEqual(first + second, [])
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+        self.assertIn("claimed by another clock; not sent", printed)
+
+    def test_two_clocks_baselining_at_once_send_nothing(self) -> None:
+        remote = FakeRemote()
+        remote.snapshot = []
+        now = utc(2026, 9, 28, 19, 31)
+        run_tick(remote, self.enrolled, now)
+        run_tick(remote, self.enrolled, now)
+        self.assertEqual(remote.dispatched, [])
+        self.assertEqual(
+            remote.marks, {mark_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30))}
+        )
+
+    def test_a_failed_send_releases_its_mark_so_the_next_tick_retries(self) -> None:
+        remote = FakeRemote(
+            marked(DAILY, utc(2026, 9, 27, 19, 30)), failing_dispatches=1
+        )
+        now = utc(2026, 9, 28, 19, 31)
+        problems, _ = run_tick(remote, self.enrolled, now)
+        self.assertEqual(len(problems), 1)
+        self.assertNotIn(
+            mark_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30)), remote.marks
+        )
+        # The previous mark is still there, so the line delivers rather than
+        # baselining.
+        problems, _ = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 36))
+        self.assertEqual(problems, [])
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+
+    def test_a_slot_the_ledger_records_is_marked_and_not_sent(self) -> None:
+        remote = FakeRemote(
+            marked(DAILY, utc(2026, 9, 27, 19, 30)), done=[utc(2026, 9, 28, 19, 30)]
+        )
+        _, printed = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(remote.dispatched, [])
+        self.assertIn(
+            mark_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30)), remote.marks
+        )
+        self.assertIn("already recorded done; not sent", printed)
+
     def test_an_enrollment_is_delivered_from_the_slot_after_its_baseline(
         self,
     ) -> None:
-        # The baseline for a changed enrollment must record the line as handled
-        # while enrolled; otherwise every later slot would baseline again and
-        # the enrolled workflow would never be delivered.
-        enrolled = parsed({"backup.yml": ENROLLED})
-        state: dict[str, Handled] = {}
-        with contextlib.redirect_stdout(io.StringIO()):
-            problems = tick(
-                "owner/name",
-                parsed({"backup.yml": TRACKED}),
-                state,
-                utc(2026, 9, 27, 20, 0),
-                send=False,
-            )
-            problems += tick(
-                "owner/name", enrolled, state, utc(2026, 9, 28, 21, 0), send=False
-            )
-        self.assertEqual(problems, [])
-        self.assertEqual(state, {DAILY_KEY: Handled(utc(2026, 9, 28, 19, 30), True)})
-        workflow = scheduled_workflow("backup.yml", enrolled["backup.yml"])
-        assert workflow is not None
-        steps = plan([workflow], state, utc(2026, 9, 29, 19, 30))
-        self.assertEqual(
-            [(s.kind, s.slot) for s in steps], [("deliver", utc(2026, 9, 29, 19, 30))]
+        # Not enrolled, the workflow has no marks; enrolled, its first tick
+        # baselines and the next slot is sent.
+        remote = FakeRemote()
+        run_tick(remote, parsed({"backup.yml": TRACKED}), utc(2026, 9, 27, 20, 0))
+        self.assertEqual(remote.marks, set())
+        run_tick(remote, self.enrolled, utc(2026, 9, 28, 21, 0))
+        run_tick(remote, self.enrolled, utc(2026, 9, 29, 19, 31))
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 29, 19, 30))])
+
+    def test_disenrolling_removes_the_marks(self) -> None:
+        remote = FakeRemote(marked(DAILY, utc(2026, 9, 28, 19, 30)))
+        run_tick(remote, parsed({"backup.yml": TRACKED}), utc(2026, 9, 28, 20, 0))
+        self.assertEqual(remote.marks, set())
+
+    def test_an_unreadable_file_keeps_its_marks(self) -> None:
+        marks = marked(DAILY, utc(2026, 9, 28, 19, 30))
+        remote = FakeRemote(marks)
+        run_tick(remote, {}, utc(2026, 9, 28, 20, 0), unreadable=["backup.yml"])
+        self.assertEqual(remote.marks, set(marks))
+
+    def test_a_dry_run_writes_nothing(self) -> None:
+        marks = marked(DAILY, *(utc(2026, 9, day, 19, 30) for day in (25, 26, 27)))
+        remote = FakeRemote(marks)
+        _, printed = run_tick(
+            remote, self.enrolled, utc(2026, 9, 28, 19, 31), send=False
         )
+        self.assertEqual((remote.marks, remote.dispatched), (set(marks), []))
+        self.assertIn("would send (dry run)", printed)
+        self.assertIn("would remove 1 old mark(s) (dry run)", printed)
+
+    def test_marks_that_cannot_be_read_send_nothing(self) -> None:
+        class Unreadable(FakeRemote):
+            def read_marks(self, repo: str) -> list[Mark]:
+                raise GitHubError("gh: Server Error (HTTP 502)")
+
+        remote = Unreadable()
+        problems, _ = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(len(problems), 1)
+        self.assertEqual((remote.marks, remote.dispatched), (set(), []))
 
 
 class MainTest(unittest.TestCase):
     """A tick that could not read what it had to deliver must fail, so whatever
-    runs the clock reports it, and must not lose the state it already holds."""
+    runs the clock reports it; a file it could not read must not stop the rest."""
 
     def run_main(
-        self, load: workflow_files.Loader, state: dict[str, Handled]
-    ) -> tuple[int, str, dict[str, Handled]]:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "state.json"
-            save_state(path, state)
-            printed = io.StringIO()
-            with contextlib.redirect_stdout(printed):
-                status = clock.main(
-                    ["--repo", "owner/name", "--state", str(path)],
-                    now=utc(2026, 9, 29, 19, 31),
-                    load=load,
-                )
-            return status, printed.getvalue(), load_state(path)
+        self, load: workflow_files.Loader, remote: FakeRemote
+    ) -> tuple[int, str]:
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            status = clock.main(
+                ["--repo", REPO, "--send"],
+                now=utc(2026, 9, 29, 19, 31),
+                load=load,
+                remote=remote,
+            )
+        return status, printed.getvalue()
 
-    def test_a_tick_that_reads_nothing_fails_and_keeps_the_state(self) -> None:
+    def test_a_tick_that_reads_nothing_fails_and_sends_nothing(self) -> None:
         def unreachable(_repo: str) -> tuple[dict[str, object], dict[str, str]]:
             raise GitHubError("gh: Server Error (HTTP 502)")
 
-        state = {DAILY_KEY: Handled(utc(2026, 9, 28, 19, 30), True)}
-        status, printed, after = self.run_main(unreachable, state)
+        remote = FakeRemote(marked(DAILY, utc(2026, 9, 28, 19, 30)))
+        status, printed = self.run_main(unreachable, remote)
         self.assertEqual(status, 1)
         self.assertIn("HTTP 502", printed)
-        self.assertEqual(after, state)
+        self.assertEqual(remote.dispatched, [])
 
     def test_an_unreadable_file_fails_the_tick_but_not_the_rest(self) -> None:
-        # The readable workflow is still delivered (in shadow mode, logged);
-        # the unreadable one is named, and the tick goes red over it.
         def load(_repo: str) -> tuple[dict[str, object], dict[str, str]]:
             return parsed({"backup.yml": ENROLLED}), {"broken.yml": "bad YAML"}
 
-        state = {DAILY_KEY: Handled(utc(2026, 9, 28, 19, 30), True)}
-        status, printed, after = self.run_main(load, state)
+        remote = FakeRemote(marked(DAILY, utc(2026, 9, 28, 19, 30)))
+        status, printed = self.run_main(load, remote)
         self.assertEqual(status, 1)
         self.assertIn("broken.yml: unreadable: bad YAML", printed)
-        self.assertIn("would send", printed)
-        self.assertEqual(after[DAILY_KEY].slot, utc(2026, 9, 29, 19, 30))
-
-
-class StateFileTest(unittest.TestCase):
-    def test_round_trip(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "nested" / "state.json"
-            state = {
-                "backup.yml 30 19 * * *": Handled(utc(2026, 9, 28, 19, 30), True),
-                "x.yml 0 1 * * *": Handled(utc(2026, 9, 28, 1, 0), False),
-            }
-            save_state(path, state)
-            self.assertEqual(load_state(path), state)
-
-    def test_missing_or_damaged_state_reads_as_empty(self) -> None:
-        # Empty state re-baselines every line, which sends nothing - the safe
-        # reading of a state that cannot be trusted.
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "state.json"
-            self.assertEqual(load_state(path), {})
-            for damaged in (
-                "{not json",
-                '["k"]',
-                '{"k": 1}',
-                '{"k": "2026-09-28T19:30Z"}',
-                '{"k": {"slot": "2026-09-28T19:30", "enrolled": true}}',
-                '{"k": {"slot": "2026-09-28T19:30Z", "enrolled": "yes"}}',
-            ):
-                with self.subTest(damaged=damaged):
-                    path.write_text(damaged, encoding="utf-8")
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        self.assertEqual(load_state(path), {})
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 29, 19, 30))])
 
 
 if __name__ == "__main__":

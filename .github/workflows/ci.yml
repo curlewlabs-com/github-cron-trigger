@@ -78,6 +78,12 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    # One at a time across every ref: the clock check claims and removes the
+    # repository's marks for clock-check.yml, which a second live job running
+    # beside it would see change under it.
+    concurrency:
+      group: live-check
+      cancel-in-progress: false
     # Holds the full retry ladder of a failing `gh` call (github.py's
     # GH_TIMEOUT_SECONDS and RETRY_DELAYS_SECONDS) for the check and again for
     # its cleanup, so an API outage ends in a failed step with its message
@@ -109,10 +115,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RECORD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          # Only a pull request may skip the clock check: its default branch can
+          # predate the workflow the check runs clocks against.
+          set --
+          if [ "$EVENT_NAME" != pull_request ]; then set -- --require-clock-check; fi
           python3 -m tests.live_check \
             --repo "$GITHUB_REPOSITORY" \
             --sha "$RECORD_SHA" \
             --workflow-file "ci-check-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.yml" \
             --workflow-ref "$GITHUB_WORKFLOW_REF" \
-            --workflow-sha "$GITHUB_WORKFLOW_SHA"
+            --workflow-sha "$GITHUB_WORKFLOW_SHA" \
+            "$@"
