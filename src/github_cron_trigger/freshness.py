@@ -48,7 +48,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import slot_ledger, workflow_files, yq
+from . import default_branch, slot_ledger, yq
 from .clock import EVENT_TYPE_PREFIX, scheduled_workflow, uses_slot_action
 from .cron_slots import (
     UTC,
@@ -341,7 +341,7 @@ def main(
     argv: Sequence[str],
     now: datetime | None = None,
     records: Callable[[str, str], list[str]] = slot_ledger.records,
-    load: workflow_files.Loader = workflow_files.load_default_branch,
+    load: default_branch.Loader = default_branch.load,
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="github-cron-trigger missed",

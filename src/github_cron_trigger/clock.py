@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
 
-from . import slot_ledger, workflow_files, yq
+from . import default_branch, slot_ledger, yq
 from .clock_marks import KEEP_PER_LINE, GitHubMarks, Mark, mark_for
 from .cron_slots import (
     UTC,
@@ -380,7 +380,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(
     argv: Sequence[str],
     now: datetime | None = None,
-    load: workflow_files.Loader = workflow_files.load_default_branch,
+    load: default_branch.Loader = default_branch.load,
     remote: Remote | None = None,
 ) -> int:
     args = _parser().parse_args(argv)

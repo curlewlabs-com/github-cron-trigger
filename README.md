@@ -272,6 +272,13 @@ each line's two newest marks and removes the rest.
 - **Dry run first.** Without `--send`, a tick reads everything and reports what
   it would do - baseline, send, or remove old marks - and writes nothing.
   Removing `--send` later is the off switch.
+- **What an idle tick costs.** Two small requests: the id of the default
+  branch's `.github/workflows` tree, which changes only when a workflow file
+  does, and the clock's marks. Workflow files are downloaded and parsed only
+  when they change, and then only the changed ones; everything read before is
+  reused from a cache under `$XDG_CACHE_HOME/github-cron-trigger` (or
+  `~/.cache/github-cron-trigger`), keyed by content id. The cache is only a
+  cache: deleting it costs one full read and changes nothing the clock decides.
 - **Exit status.** A tick that could not read a workflow, the marks or the
   ledger, or could not send a slot, logs the problem and exits 1, so the
   scheduler running it can report it.

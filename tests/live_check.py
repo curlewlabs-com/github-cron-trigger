@@ -42,10 +42,20 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-from github_cron_trigger import clock, freshness, slot_ledger, steps, workflow_files
+from github_cron_trigger import (
+    clock,
+    default_branch,
+    freshness,
+    slot_ledger,
+    steps,
+    workflow_files,
+    yq,
+)
 from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for
 from github_cron_trigger.cron_slots import UTC, format_slot, latest_slot, parse_cron
 from github_cron_trigger.github import gh_api
@@ -189,6 +199,27 @@ def readers(repo: str, workflow_ref: str, workflow_sha: str) -> None:
     _expect(
         status == 1 and not outputs and "is not one of" in printed,
         "a dispatch of a line this workflow does not carry is refused",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        cache = default_branch.Cache(Path(tmp))
+        calls: list[str] = []
+        parses: list[str] = []
+
+        def counted(query: str, variables: Mapping[str, str]) -> Any:
+            calls.append(query)
+            return default_branch.graphql(query, variables)
+
+        def parser() -> str:
+            parses.append("yq")
+            return yq.executable()
+
+        first = default_branch.load(repo, cache, counted, parser)
+        calls.clear()
+        parses.clear()
+        second = default_branch.load(repo, cache, counted, parser)
+    _expect(
+        second == first and len(calls) == 1 and not parses,
+        f"an idle read of {len(first[0])} workflow file(s) is one query and no parse",
     )
     status = freshness.main(["--repo", repo])
     _expect(

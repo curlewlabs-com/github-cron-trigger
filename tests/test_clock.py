@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from github_cron_trigger import clock, workflow_files, yq
+from github_cron_trigger import clock, default_branch, workflow_files, yq
 from github_cron_trigger.clock import (
     ScheduledWorkflow,
     plan,
@@ -490,7 +490,7 @@ class MainTest(unittest.TestCase):
     runs the clock reports it; a file it could not read must not stop the rest."""
 
     def run_main(
-        self, load: workflow_files.Loader, remote: FakeRemote
+        self, load: default_branch.Loader, remote: FakeRemote
     ) -> tuple[int, str]:
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
