@@ -7,9 +7,10 @@
 # and skip it, and a manual or pull request run must behave exactly as it did
 # before enrollment. This action is that decision; the README has the contract.
 #
-# The enrolling workflow must serialize its scheduled runs with a concurrency
-# group: this check and the record the done action writes are separate calls,
-# so deliveries of one slot running side by side could each find it owed.
+# A workflow running this action, chained ones included, must serialize its
+# scheduled runs with a concurrency group: this check and the record the done
+# action writes are separate calls, so deliveries of one slot running side by
+# side could each find it owed (the README's "One run at a time").
 #
 # Runs the code beside it, so the workflow needs no checkout. Needs python3
 # (3.10 or newer) and `gh` on the runner, and for a scheduled delivery, which

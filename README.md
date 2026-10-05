@@ -112,31 +112,12 @@ A workflow is **enrolled** when it declares `repository_dispatch` with the type
 name in its type, so the clock refuses it rather than sending its slots under a
 type it does not listen to.
 
-**The concurrency group makes a slot run once.** The slot check and the record
-are separate calls, so deliveries of one slot running side by side could each
-find the slot owed and each do the work. Serialized, a later delivery starts
-only after the earlier one has recorded, and it skips.
+**The concurrency group makes a slot run once** ("One run at a time" says why,
+and what other workflows declare).
 
 **Why a separate record job.** Recording needs `contents: write`, a token that
 can push to the repository. In its own job, holding nothing else, that grant is
 never in reach of the work's steps or of anything they install.
-
-A workflow that also runs on pull requests, where a PR run only verifies or
-dry-runs, can key that run by its run id so it never waits in the shared queue:
-
-```yaml
-concurrency:
-  group:
-    ${{ github.event_name == 'pull_request' && format('backup-pr-{0}',
-    github.run_id) || 'backup' }}
-  queue: max
-  cancel-in-progress: false
-```
-
-GitHub reads `queue` only as a literal and refuses `queue: max` beside
-`cancel-in-progress: true`, so one group cannot both queue deliveries and drop
-a push's superseded run. A PR run that touches what the deliveries guard, such
-as a plan that reads a live state lock, stays in the shared group instead.
 
 ### The slot action's outputs
 
@@ -186,8 +167,9 @@ A later delivery then redoes only the legs whose part is missing.
 ## Enrolling a reconciler
 
 A workflow that reads the current state on every run and changes only what is
-out of date is harmless to run twice, so it needs no slot action, no ledger
-and no record job. Declaring the dispatch type is the whole enrollment:
+out of date is harmless to run again, so it needs no slot action, no ledger and
+no record job. Declaring the dispatch type and a concurrency group is the whole
+enrollment:
 
 ```yaml
 on:
@@ -195,7 +177,13 @@ on:
     - cron: "17 * * * *"
   repository_dispatch:
     types: [github-cron-trigger/release-watch.yml]
+
+concurrency:
+  group: release-watch
+  cancel-in-progress: false
 ```
+
+"One run at a time" says why a reconciler needs the group.
 
 Without the slot action, a line may fire more than once a day. Each dispatch
 names its exact slot, so nothing has to be attributed by time.
@@ -218,6 +206,53 @@ reason as a `schedule` delivery.
 Re-delivering a chained slot through its parent works only while that slot is
 still the parent line's newest, because the chained run takes the parent
 line's newest slot whatever the parent was sent.
+
+A chained workflow declares a concurrency group as well, as any workflow
+running the slot action does ("One run at a time").
+
+## One run at a time
+
+Every enrolled workflow, and every workflow that runs the slot action,
+declares a concurrency group its scheduled runs share. Enrolling makes runs
+overlap where they rarely did: when GitHub's queue is short, its `schedule` run
+and the clock's dispatch of the same slot start minutes apart, and a slow run
+can still be going when the next slot arrives.
+
+- **A workflow running the slot action** needs the group to run a slot once.
+  The slot check and the record are separate calls, so deliveries of one slot
+  running side by side could each find the slot owed and each do the work.
+  Serialized, a later delivery starts only after the earlier one has recorded,
+  and it skips. Declare `queue: max` with `cancel-in-progress: false`, as the
+  example under "Enrolling a workflow" does: by default a group holds one
+  waiting run and cancels it when another arrives, and a cancelled delivery
+  leaves its slot to a later delivery, if one is coming.
+- **A chained workflow** declares a group as well; the parent's declaration
+  does not reach it. The parent's group keeps the parent's deliveries apart,
+  but each one starts a chained run as it finishes, and the first chained run
+  can still be going when the second one starts.
+- **A reconciler** needs one too. A reconciler is harmless to run again, not
+  necessarily to run twice at once: two runs that read the same state can both
+  act on it, as two that each open the same pull request would.
+  `cancel-in-progress: false` on the default queue is enough here, without
+  `queue: max`. A waiting run that a newer one replaces loses nothing, because
+  the newer one reconciles from later state.
+
+A workflow that also runs on pull requests, where a PR run only verifies or
+dry-runs, can key that run by its run id so it never waits in the shared queue:
+
+```yaml
+concurrency:
+  group:
+    ${{ github.event_name == 'pull_request' && format('backup-pr-{0}',
+    github.run_id) || 'backup' }}
+  queue: max
+  cancel-in-progress: false
+```
+
+GitHub reads `queue` only as a literal and refuses `queue: max` beside
+`cancel-in-progress: true`, so one group cannot both queue deliveries and drop
+a push's superseded run. A PR run that touches what the deliveries guard, such
+as a plan that reads a live state lock, stays in the shared group instead.
 
 ## The clock
 
