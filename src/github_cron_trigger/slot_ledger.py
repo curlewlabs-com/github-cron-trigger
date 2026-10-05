@@ -98,15 +98,25 @@ def is_done(
 ) -> bool:
     """Whether the ledger records this slot (and part) as done."""
     path = ref_path(workflow_file, schedule, slot, part)
+    return ref_target(repo, path) is not None
+
+
+def ref_target(repo: str, path: str) -> str | None:
+    """The object `refs/<path>` points at, or None when there is no such ref."""
     try:
         # git/ref/ (singular) matches exactly; git/matching-refs/ would also
         # answer for a longer ref that merely starts with this one.
-        gh_api([f"repos/{check_repo(repo)}/git/ref/{path}"])
+        out = gh_api(
+            [f"repos/{check_repo(repo)}/git/ref/{path}", "--jq", ".object.sha"]
+        )
     except HttpError as exc:
         if exc.status == 404:
-            return False
+            return None
         raise
-    return True
+    target = out.strip()
+    if not _OBJECT.match(target):
+        raise GitHubError(f"ref {path} answered {target!r}, not an object name")
+    return target
 
 
 def record_note(sha: str) -> str:

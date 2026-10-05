@@ -251,9 +251,12 @@ create succeeds, and only that clock sends. So:
   one host is asleep or down, another delivers on time.
 - **A host keeps nothing.** One can join, leave or be rebuilt with nothing to
   copy, and what has been sent can be read from the repository.
-- **A failed send releases its claim**, so the next tick, on any host, sends
-  the slot again. A clock stopped between its claim and its send leaves that
-  slot to GitHub's backstop: late, but still delivered.
+- **A failed send releases its claim**, as does a failed ledger read before it,
+  so the next tick, on any host, sends the slot again. A claim that GitHub
+  applied but answered as failed or refused is still recognized as the clock's
+  own: each claim's ref points at a note unique to it. A clock stopped between
+  its claim and its send leaves that slot to GitHub's backstop: late, but still
+  delivered.
 
 These marks are not the ledger. The ledger records slots whose work finished,
 and the slot action reads it; marks record slots a clock sent, for every
@@ -289,7 +292,7 @@ Any host that can reach `api.github.com` will do, and more than one is better.
 Install a release, which puts `github-cron-trigger` on PATH:
 
 ```sh
-pip install "github-cron-trigger @ git+https://github.com/curlewlabs-com/github-cron-trigger@v0.2.0"
+pip install "github-cron-trigger @ git+https://github.com/curlewlabs-com/github-cron-trigger@v0.2.1"
 ```
 
 Or check out a release tag and run it as `PYTHONPATH=src python3 -m
