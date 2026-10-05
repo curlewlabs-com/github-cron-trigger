@@ -40,6 +40,9 @@ A workflow whose repeated runs are harmless (a reconciler) needs only the clock.
   ref outside `refs/heads` and `refs/tags` is not a branch or a tag; nothing
   lists it in the UI or fetches it by default. `slot_ledger.py` says why a ref
   is the record and how the line is written into it.
+- **Mark**: a clock's claim of a slot it sends, also a git ref, under
+  `refs/github-cron-trigger-clock/`. Marks are how several clocks share the
+  work without sending a slot twice ("The clock").
 - **Part**: a run whose legs are recorded separately (one per environment, say)
   records `<slot>.<part>` for each leg, so another delivery redoes only a leg
   that failed.
@@ -219,50 +222,82 @@ line's newest slot whatever the parent was sent.
 ## The clock
 
 `tick` is the delivering half, run on a short interval by any scheduler outside
-GitHub:
+GitHub, on one host or several:
 
 ```sh
-python3 -m github_cron_trigger tick --repo owner/name \
-    --state ~/.local/state/github-cron-trigger/owner-name.json --send
+python3 -m github_cron_trigger tick --repo owner/name --send
 ```
 
 Each tick reads the workflow files of the repository's default branch through
 the API, in a single GraphQL query, so the host needs no clone. It works out
-every `cron:` line's latest due slot in UTC and sends it to an enrolled
+every enrolled `cron:` line's latest due slot in UTC and sends it to the
 workflow as a `repository_dispatch`: the newest due slot per line only, and
 never a slot the ledger already records. A merged change to a workflow reaches
 the clock at its next tick.
 
-- **Shadow mode first.** Without `--send`, a tick only logs what it would send,
-  for every scheduled workflow, enrolled or not. Run it that way for a few days
-  and compare its log with GitHub's own `schedule` runs before turning sending
-  on. Removing `--send` later is the off switch.
-- **Baselines.** A line is baselined without sending when the clock sees it for
-  the first time or its workflow's enrollment has changed, because its latest
-  slot may have run before anything could record it.
-- **Sleep.** After a gap, such as a laptop asleep, the clock sends one delivery
-  per line, for the newest due slot, never a burst. A slot it slept through
-  entirely is left to GitHub's backstop: late, but still exactly once.
-- **State.** The state file is a local cache. Losing it re-baselines every line,
-  which sends nothing. Use one state file per repository.
-- **Exit status.** A tick that could not read a workflow, or could not send a
-  slot, logs the problem and exits 1, so the scheduler running it can report
-  it. A failed send is retried at the next tick.
+### What it remembers, and where
+
+The clock keeps its memory in the repository it serves, not on its host. Before
+it sends a slot it claims it, by creating a git ref:
+
+```text
+refs/github-cron-trigger-clock/<workflow file>/<cron line>/<YYYYMMDDTHHMMZ>
+```
+
+Creating a ref is atomic: when several clocks claim the same slot, exactly one
+create succeeds, and only that clock sends. So:
+
+- **Run it on as many hosts as you like.** Each slot is still sent once. While
+  one host is asleep or down, another delivers on time.
+- **A host keeps nothing.** One can join, leave or be rebuilt with nothing to
+  copy, and what has been sent can be read from the repository.
+- **A failed send releases its claim**, so the next tick, on any host, sends
+  the slot again. A clock stopped between its claim and its send leaves that
+  slot to GitHub's backstop: late, but still delivered.
+
+These marks are not the ledger. The ledger records slots whose work finished,
+and the slot action reads it; marks record slots a clock sent, for every
+enrolled workflow, reconcilers included, and only clocks read them. A tick keeps
+each line's two newest marks and removes the rest.
+
+### How it behaves
+
+- **Baselines.** A line no clock has marked is baselined - its latest slot is
+  marked without sending - because that slot may have run before anything could
+  record it. A workflow that stops being enrolled has its marks removed, so
+  enrolling it again baselines it again.
+- **Sleep.** After a gap with no clock up, the next tick sends one delivery per
+  line, for the newest due slot, never a burst. Slots no clock was up for are
+  left to GitHub's backstop: late, but still exactly once.
+- **Dry run first.** Without `--send`, a tick reads everything and reports what
+  it would do - baseline, send, or remove old marks - and writes nothing.
+  Removing `--send` later is the off switch.
+- **What an idle tick costs.** Two small requests: the id of the default
+  branch's `.github/workflows` tree, which changes only when a workflow file
+  does, and the clock's marks. Workflow files are downloaded and parsed only
+  when they change, and then only the changed ones; everything read before is
+  reused from a cache under `$XDG_CACHE_HOME/github-cron-trigger` (or
+  `~/.cache/github-cron-trigger`), keyed by content id. The cache is only a
+  cache: deleting it costs one full read and changes nothing the clock decides.
+- **Exit status.** A tick that could not read a workflow, the marks or the
+  ledger, or could not send a slot, logs the problem and exits 1, so the
+  scheduler running it can report it.
 
 ### Hosting it
 
-Any host that stays up and can reach `api.github.com` will do. Install a
-release, which puts `github-cron-trigger` on PATH:
+Any host that can reach `api.github.com` will do, and more than one is better.
+Install a release, which puts `github-cron-trigger` on PATH:
 
 ```sh
-pip install "github-cron-trigger @ git+https://github.com/curlewlabs-com/github-cron-trigger@v0.1.0"
+pip install "github-cron-trigger @ git+https://github.com/curlewlabs-com/github-cron-trigger@v0.2.0"
 ```
 
 Or check out a release tag and run it as `PYTHONPATH=src python3 -m
-github_cron_trigger`. Then run `tick` every few minutes. A crontab line:
+github_cron_trigger`. Then run `tick` every few minutes, once per repository
+served. A crontab line:
 
 ```crontab
-*/5 * * * * github-cron-trigger tick --repo owner/name --state "$HOME/.local/state/github-cron-trigger/owner-name.json" --send >> "$HOME/github-cron-trigger.log" 2>&1
+*/5 * * * * github-cron-trigger tick --repo owner/name --send >> "$HOME/github-cron-trigger.log" 2>&1
 ```
 
 On macOS, a launchd agent with `StartInterval` 300 does the same. On Linux, a
@@ -278,8 +313,9 @@ The clock calls the API through the `gh` CLI, so it uses whatever `gh` is
 logged in as, or `GH_TOKEN` when that is set. A fine-grained personal access
 token limited to the enrolled repositories needs:
 
-- **Contents: Read and write.** Sending a `repository_dispatch` requires it.
-  Reading the workflow files and the ledger is the read half.
+- **Contents: Read and write.** Sending a `repository_dispatch` requires it,
+  and so does creating and removing the clock's marks. Reading the workflow
+  files, the marks and the ledger is the read half.
 - **Metadata: Read**, which every fine-grained token carries.
 
 ## Missed slots
@@ -377,8 +413,9 @@ an every-minute line runs is set by how often the clock ticks.
   releases page has a binary for every platform. The apt package named `yq` on
   Debian and Ubuntu is a different program, and the slot action refuses it by
   name. `MINIMUM_VERSION` in `yq.py` says why the floor sits where it does.
-- **The clock's host**: `python3`, `gh` and yq as above, a scheduler, and a
-  token as described under "The clock's token".
+- **The clock's hosts**: `python3`, `gh` and yq as above, a scheduler, and a
+  token as described under "The clock's token". Nothing else; a host keeps no
+  state.
 
 ## Versioning
 

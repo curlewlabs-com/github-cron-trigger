@@ -24,21 +24,39 @@ checks cannot collide, and removed again whatever the outcome.
 THE READERS. The slot command reads the running workflow's own file through the
 contents API at the run's commit and parses it with the runner's yq; the clock
 and the missed-slot check read every workflow of the default branch in one
-GraphQL query. Each is run here as a step or a host would run it: a dispatched slot of this workflow's own line resolves and reads
-the ledger, a line the workflow does not carry is refused, a shadow-mode tick
-baselines this repository's lines without sending, and the missed-slot check
-reads everything.
+GraphQL query. Each is run here as a step or a host would run it: a dispatched
+slot of this workflow's own line resolves and reads the ledger, a line the
+workflow does not carry is refused, and the missed-slot check reads everything.
+
+THE CLOCKS. Two clock processes tick this repository with --send at the same
+moment, as two hosts would, against clock-check.yml, a workflow enrolled for
+this. With no marks, they baseline its newest slot once and send nothing; with
+an older slot marked, exactly one of them sends the newest. The marks live in
+the repository (clock_marks.py), and are removed again whatever the outcome.
 """
 
 import argparse
 import contextlib
 import io
+import os
+import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-from github_cron_trigger import clock, freshness, slot_ledger, steps, workflow_files
+from github_cron_trigger import (
+    clock,
+    default_branch,
+    freshness,
+    slot_ledger,
+    steps,
+    workflow_files,
+    yq,
+)
+from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for
 from github_cron_trigger.cron_slots import UTC, format_slot, latest_slot, parse_cron
 from github_cron_trigger.github import gh_api
 from github_cron_trigger.workflow_triggers import utc_schedule
@@ -183,17 +201,126 @@ def readers(repo: str, workflow_ref: str, workflow_sha: str) -> None:
         "a dispatch of a line this workflow does not carry is refused",
     )
     with tempfile.TemporaryDirectory() as tmp:
-        state = Path(tmp) / "state.json"
-        status = clock.main(["--repo", repo, "--state", str(state)])
-        handled = clock.load_state(state)
+        cache = default_branch.Cache(Path(tmp))
+        calls: list[str] = []
+        parses: list[str] = []
+
+        def counted(query: str, variables: Mapping[str, str]) -> Any:
+            calls.append(query)
+            return default_branch.graphql(query, variables)
+
+        def parser() -> str:
+            parses.append("yq")
+            return yq.executable()
+
+        first = default_branch.load(repo, cache, counted, parser)
+        calls.clear()
+        parses.clear()
+        second = default_branch.load(repo, cache, counted, parser)
     _expect(
-        status == 0 and bool(handled),
-        f"a shadow-mode tick reads the default branch and baselines {len(handled)} line(s)",
+        second == first and len(calls) == 1 and not parses,
+        f"an idle read of {len(first[0])} workflow file(s) is one query and no parse",
     )
     status = freshness.main(["--repo", repo])
     _expect(
         status & freshness.EXIT_INCOMPLETE == 0,
         "the missed-slot check reads everything",
+    )
+
+
+# The enrolled workflow the clock check runs real clocks against. Its yearly line
+# always has a newest slot, and the slot before it, to claim; the workflow says
+# why it exists.
+CLOCK_CHECK = "clock-check.yml"
+YEARLY = parse_cron("0 0 1 1 *")
+MARKS = GitHubMarks()
+
+
+def _clock_marks(repo: str) -> list[Mark]:
+    return [mark for mark in MARKS.read(repo) if mark.workflow_file == CLOCK_CHECK]
+
+
+def _concurrent_ticks(repo: str) -> list[str]:
+    """Two clocks ticking the repository with --send at the same moment, as two
+    hosts would; their output."""
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+    }
+    command = [
+        sys.executable,
+        "-m",
+        "github_cron_trigger",
+        "tick",
+        "--repo",
+        repo,
+        "--send",
+    ]
+    clocks = [
+        subprocess.Popen(command, stdout=subprocess.PIPE, text=True, env=environment)
+        for _ in range(2)
+    ]
+    outputs = [clock_process.communicate(timeout=600)[0] for clock_process in clocks]
+    for output in outputs:
+        print(output, end="")
+    return outputs
+
+
+def _default_branch_has(repo: str, workflow_file: str) -> bool:
+    names = gh_api([f"repos/{repo}/contents/.github/workflows", "--jq", ".[].name"])
+    return workflow_file in names.split()
+
+
+def _sends(outputs: list[str]) -> int:
+    return sum(
+        line.startswith(f"clock: {CLOCK_CHECK} cron") and line.endswith(": sent")
+        for output in outputs
+        for line in output.splitlines()
+    )
+
+
+def clocks(repo: str, required: bool) -> None:
+    """Two clocks at once: a line no clock has marked is baselined once and
+    sent nothing, and a due slot is sent exactly once.
+
+    The clock reads the default branch, so the pull request that adds or changes
+    clock-check.yml cannot run this against its own copy. A pull request whose
+    default branch lacks the workflow skips it, saying so; any other run
+    (`required`) fails instead, so the default branch always runs it.
+    """
+    if not _default_branch_has(repo, CLOCK_CHECK):
+        if required:
+            raise AssertionError(f"{CLOCK_CHECK} is not on the default branch")
+        print(f"skipped: {CLOCK_CHECK} is not on the default branch yet")
+        return
+    MARKS.remove(repo, _clock_marks(repo))
+    now = datetime.now(UTC)
+    newest = latest_slot(YEARLY, now)
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        status = clock.main(["--repo", repo])
+    _expect(
+        status == 0
+        and "would baseline (dry run)" in printed.getvalue()
+        and not _clock_marks(repo),
+        "a dry run reads the repository, reports a baseline, and writes nothing",
+    )
+    outputs = _concurrent_ticks(repo)
+    _expect(
+        _sends(outputs) == 0 and [mark.slot for mark in _clock_marks(repo)] == [newest],
+        "two clocks baselining at once mark the newest slot once and send nothing",
+    )
+    MARKS.remove(repo, _clock_marks(repo))
+    MARKS.claim(
+        repo,
+        mark_for(
+            CLOCK_CHECK, YEARLY, latest_slot(YEARLY, newest - timedelta(minutes=1))
+        ),
+    )
+    outputs = _concurrent_ticks(repo)
+    _expect(
+        _sends(outputs) == 1 and newest in [mark.slot for mark in _clock_marks(repo)],
+        "two clocks ticking a due slot at once send it exactly once",
     )
 
 
@@ -206,8 +333,17 @@ def main() -> int:
     )
     parser.add_argument("--workflow-ref", required=True, help="GITHUB_WORKFLOW_REF")
     parser.add_argument("--workflow-sha", required=True, help="GITHUB_WORKFLOW_SHA")
+    parser.add_argument(
+        "--require-clock-check",
+        action="store_true",
+        help=f"fail rather than skip when {CLOCK_CHECK} is not on the default branch",
+    )
     args = parser.parse_args()
     readers(args.repo, args.workflow_ref, args.workflow_sha)
+    try:
+        clocks(args.repo, args.require_clock_check)
+    finally:
+        MARKS.remove(args.repo, _clock_marks(args.repo))
     try:
         run(args.repo, args.sha, args.workflow_file)
     finally:

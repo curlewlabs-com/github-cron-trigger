@@ -1,8 +1,9 @@
 """Workflow files, read from GitHub and parsed into the document GitHub reads.
 
-Every reader here works at a commit the caller names or at the default branch,
-never from a checkout: the slot action needs no checkout of the repository it
-runs in, and the clock can serve a repository it has no clone of.
+The slot action reads one file at the commit its run executed (fetch_file),
+never from a checkout, so it needs no checkout of the repository it runs in.
+The clock's and the missed-slot check's reads of the default branch are
+default_branch.py's.
 
 PARSING goes through mikefarah's yq on PATH (yq.py), whose JSON output Python reads. A
 file is refused rather than half-read when it is not one workflow GitHub would
@@ -14,11 +15,11 @@ level that is not a mapping, such as an empty file.
 import json
 import re
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 from . import yq
-from .github import GitHubError, check_repo, gh_api
+from .github import check_repo, gh_api
 
 WORKFLOW_SUFFIXES = (".yml", ".yaml")
 WORKFLOW_DIRECTORY = ".github/workflows"
@@ -44,29 +45,6 @@ _YQ_ARGUMENTS = (
 
 # A bound on one parse, so a wedged yq cannot hold a run open.
 _YQ_TIMEOUT_SECONDS = 60
-
-# Every workflow file of the default branch in one query, however many there
-# are; reading them one REST call at a time would cost a call per file per tick.
-_DEFAULT_BRANCH_QUERY = """
-query($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) {
-    object(expression: "HEAD:.github/workflows") {
-      ... on Tree {
-        entries {
-          name
-          type
-          object { ... on Blob { text isBinary isTruncated } }
-        }
-      }
-    }
-  }
-}
-"""
-
-
-# Reads every workflow of a repository's default branch: owner/name -> the parsed
-# documents by file name, and the files that could not be read, with the reason.
-Loader = Callable[[str], tuple[dict[str, object], dict[str, str]]]
 
 
 class UnreadableWorkflow(ValueError):
@@ -151,56 +129,3 @@ def fetch_file(repo: str, path: str, commit: str) -> str:
             f"repos/{check_repo(repo)}/contents/{check_workflow_path(path)}?ref={commit}",
         ]
     )
-
-
-def fetch_default_branch(repo: str) -> tuple[dict[str, str], dict[str, str]]:
-    """The text of every workflow file on the default branch, keyed by file
-    name, and the files whose text GitHub would not return, with the reason."""
-    owner, name = check_repo(repo).split("/")
-    answer = json.loads(
-        gh_api(
-            [
-                "graphql",
-                "-f",
-                f"query={_DEFAULT_BRANCH_QUERY}",
-                "-f",
-                f"owner={owner}",
-                "-f",
-                f"name={name}",
-            ]
-        )
-    )
-    texts: dict[str, str] = {}
-    unreadable: dict[str, str] = {}
-    try:
-        tree = answer["data"]["repository"]["object"]
-        # A repository with no workflow directory has nothing to read.
-        entries = [] if tree is None else tree["entries"]
-        for entry in entries:
-            file_name = entry["name"]
-            if entry["type"] != "blob" or not file_name.endswith(WORKFLOW_SUFFIXES):
-                continue
-            blob = entry["object"]
-            if blob["isBinary"] or blob["isTruncated"] or blob["text"] is None:
-                unreadable[file_name] = "GitHub returned no complete text for it"
-            else:
-                texts[file_name] = blob["text"]
-    except (KeyError, TypeError) as exc:
-        raise GitHubError(
-            f"the workflow files query answered in an unexpected shape: {exc!r}"
-        ) from exc
-    return texts, unreadable
-
-
-def load_default_branch(
-    repo: str,
-    fetch: Callable[
-        [str], tuple[dict[str, str], dict[str, str]]
-    ] = fetch_default_branch,
-    executable: Callable[[], str] = yq.executable,
-) -> tuple[dict[str, object], dict[str, str]]:
-    """Every workflow on the default branch, parsed, and the files that could
-    not be read or parsed, with the reason."""
-    texts, unfetched = fetch(repo)
-    documents, unparsed = parse_all(texts, executable())
-    return documents, {**unfetched, **unparsed}

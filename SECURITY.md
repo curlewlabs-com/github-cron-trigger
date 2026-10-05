@@ -36,5 +36,10 @@ security surface is:
   first checks that the version line is mikefarah's at the minimum version, so
   a different program called `yq` is never handed arguments. Workflow text
   reaches yq on standard input, never as a path taken from the event.
-- **The clock's token.** The clock uses whatever `gh` is logged in as, or
-  `GH_TOKEN`. The README lists the narrowest fine-grained grant it needs.
+- **The clock's token, and what it writes.** The clock uses whatever `gh` is
+  logged in as, or `GH_TOKEN`. The README lists the narrowest fine-grained
+  grant it needs. Besides dispatches, it writes only its marks: refs under
+  `refs/github-cron-trigger-clock/`, named from a workflow file name, a cron
+  line and a slot, each matched against a narrow pattern first. A mark's blob
+  names the slot and nothing about the host, since anyone can read a public
+  repository's refs.

@@ -1,0 +1,20 @@
+name: Clock check
+
+# Enrolled in github-cron-trigger so CI's live check (tests/live_check.py) can
+# run real clocks against this repository: the yearly line always has a newest
+# slot, and the slot before it, for clocks to claim, and a dispatch of it runs
+# the job below. It does nothing, so a delivery repeated by GitHub's yearly
+# schedule changes nothing, and it needs no slot action.
+on:
+  schedule:
+    - cron: "0 0 1 1 *"
+  repository_dispatch:
+    types: [github-cron-trigger/clock-check.yml]
+
+permissions: {}
+
+jobs:
+  delivered:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "Delivered by a github-cron-trigger clock."

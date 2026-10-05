@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "github-cron-trigger"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run each scheduled slot of a GitHub Actions workflow on time and exactly once, with GitHub's schedule as the backstop."
 readme = "README.md"
 license = "MIT"
