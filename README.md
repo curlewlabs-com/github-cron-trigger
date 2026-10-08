@@ -238,7 +238,12 @@ can still be going when the next slot arrives.
   the newer one reconciles from later state.
 
 A workflow that also runs on pull requests, where a PR run only verifies or
-dry-runs, can key that run by its run id so it never waits in the shared queue:
+dry-runs, can key that run by its run id so it never waits in the shared queue.
+To cancel superseded PR work, also give every job on the PR path a job-level
+group keyed on the PR number, with cancellation enabled only for PR runs. On
+other events, key each job's group on the run id so the workflow-level group
+alone orders deliveries. Add these concurrency blocks to the workflow and
+jobs in "Enrolling a workflow":
 
 ```yaml
 concurrency:
@@ -247,12 +252,42 @@ concurrency:
     github.run_id) || 'backup' }}
   queue: max
   cancel-in-progress: false
+
+jobs:
+  slot:
+    concurrency:
+      group:
+        ${{ github.event_name == 'pull_request' && format('backup-slot-pr-{0}',
+        github.event.pull_request.number) || format('backup-slot-run-{0}',
+        github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+  work:
+    concurrency:
+      group:
+        ${{ github.event_name == 'pull_request' && format('backup-work-pr-{0}',
+        github.event.pull_request.number) || format('backup-work-run-{0}',
+        github.run_id) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 ```
 
-GitHub reads `queue` only as a literal and refuses `queue: max` beside
-`cancel-in-progress: true`, so one group cannot both queue deliveries and drop
-a push's superseded run. A PR run that touches what the deliveries guard, such
-as a plan that reads a live state lock, stays in the shared group instead.
+[GitHub's concurrency rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency)
+refuse `queue: max` beside `cancel-in-progress: true` in the same block, so
+deliveries queue at the workflow level and PR jobs supersede at the job level.
+Use distinct group names for each workflow and job. For a matrix job, include
+the matrix leg's identity in the PR and non-PR group names too, so legs do not
+cancel or serialize each other.
+
+Group `slot` as well as the work it gates. GitHub orders a group by when a job
+starts waiting on it, rather than when its workflow was dispatched. Grouping
+only `work` lets an older run whose `slot` finishes late reach the work group
+after the newer run and cancel the newer job. `slot` has no dependencies, so
+grouping it starts supersession at the beginning of the chain; carry this
+pattern through every job on the PR path. The enrollment example's `record` job
+skips PR runs, so it needs no PR group.
+
+A PR run that touches what the deliveries guard, such as a plan that reads a
+live state lock, stays in the shared workflow-level group instead.
 
 ## The clock
 
