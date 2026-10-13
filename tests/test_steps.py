@@ -511,8 +511,10 @@ class GhFailureClassificationTest(unittest.TestCase):
     on a transient error turns a gateway blip into a red run and, for a record
     step, a slot the other delivery then does again. The 404 and 422 lines are
     `gh api` output captured live against a repository's refs API; the
-    secondary-rate-limit and connection lines are the forms GitHub and `gh`
-    print for those failures.
+    secondary-rate-limit and name-lookup lines are the forms GitHub and `gh`
+    print for those failures. The unanswered-request lines are `gh api` output
+    too: the timeouts from a clock host's log, with the repository renamed, and
+    the proxy line from pointing HTTPS_PROXY at a closed port.
     """
 
     def test_refusals_are_not_retried(self) -> None:
@@ -521,6 +523,9 @@ class GhFailureClassificationTest(unittest.TestCase):
             ("gh: Reference already exists (HTTP 422)", 422),
             ("gh: Reference does not exist (HTTP 422)", 422),
             ("gh: Resource not accessible by integration (HTTP 403)", 403),
+            # No status, but no network either: a call gh refused before
+            # sending must not read as an unanswered one.
+            ("unknown flag: --paginatee\n\nUsage:  gh api <endpoint> [flags]", None),
         ):
             with self.subTest(stderr=stderr):
                 self.assertEqual(classify(stderr)[0], status)
@@ -535,6 +540,28 @@ class GhFailureClassificationTest(unittest.TestCase):
                 " minutes before you try again. (HTTP 403)"
             ),
             "error connecting to api.github.com\ncheck your internet connection",
+            # Requests gh sent and got no answer to. Unretried, one dropped
+            # connection on the mark read cost a whole tick, since a tick
+            # with no marks sends nothing.
+            (
+                'Get "https://api.github.com/repos/owner/name/git/matching-refs/'
+                'github-cron-trigger-clock/?per_page=100": dial tcp'
+                " 20.29.134.17:443: i/o timeout"
+            ),
+            (
+                'Get "https://api.github.com/repos/owner/name/git/matching-refs/'
+                'github-cron-trigger-clock/?per_page=100": net/http: TLS'
+                " handshake timeout"
+            ),
+            (
+                'Delete "https://api.github.com/repos/owner/name/git/refs/'
+                'github-cron-trigger-clock/backup.yml/0_1_x_x_x/20260928T0100Z":'
+                " dial tcp 20.29.134.17:443: i/o timeout"
+            ),
+            (
+                'Post "https://api.github.com/graphql": proxyconnect tcp: dial tcp'
+                " 127.0.0.1:9: connect: connection refused"
+            ),
         ):
             with self.subTest(stderr=stderr):
                 self.assertTrue(transient(*classify(stderr)))
