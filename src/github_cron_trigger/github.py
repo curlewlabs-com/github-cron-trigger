@@ -28,8 +28,15 @@ _GH_API_ERROR = re.compile(
     r"^gh: (?P<message>.*) \(HTTP (?P<status>\d{3})\)$", re.MULTILINE
 )
 
-# The failure that carries no status: `gh` never reached the host.
+# The failures that carry no status, because `gh` got no answer. A failed name
+# lookup prints the first. Any other request left unanswered - a dial or TLS
+# handshake that timed out, a reset connection, a proxy that refused - prints
+# Go's error for it, which opens with the method and the quoted URL. The shape
+# is matched rather than a list of causes, which Go words many ways; a cause no
+# retry clears, such as a refused certificate, costs only the ladder's waits
+# before the same failure.
 _CONNECT_FAILURE = "error connecting to "
+_NO_ANSWER = re.compile(r'^(?:Get|Head|Post|Put|Patch|Delete) "[^"]*": ')
 
 # GitHub answers a secondary rate limit with a 403 whose message says so. Every
 # other 403 is a refusal, so the message is the only way to tell them apart.
@@ -55,7 +62,8 @@ def classify(stderr: str) -> tuple[int | None, str]:
     """The HTTP status and message of a failed `gh api` call, from its stderr.
 
     The status is None when `gh` reported no HTTP exchange (a connection
-    failure); the message is then the whole stderr.
+    failure, or a failure before any request); the message is then the whole
+    stderr.
     """
     text = stderr.strip()
     match = _GH_API_ERROR.search(text)
@@ -67,7 +75,7 @@ def classify(stderr: str) -> tuple[int | None, str]:
 def transient(status: int | None, message: str) -> bool:
     """Whether a failure is worth retrying: the API was busy or unreachable."""
     if status is None:
-        return message.startswith(_CONNECT_FAILURE)
+        return message.startswith(_CONNECT_FAILURE) or bool(_NO_ANSWER.match(message))
     if status >= 500 or status == 429:
         return True
     return status == 403 and _SECONDARY_RATE_LIMIT in message.lower()

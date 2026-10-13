@@ -362,7 +362,7 @@ Any host that can reach `api.github.com` will do, and more than one is better.
 Install a release, which puts `github-cron-trigger` on PATH:
 
 ```sh
-pip install "github-cron-trigger @ git+https://github.com/curlewlabs-com/github-cron-trigger@v0.2.1"
+pip install "github-cron-trigger @ git+https://github.com/curlewlabs-com/github-cron-trigger@v0.2.2"
 ```
 
 Or check out a release tag and run it as `PYTHONPATH=src python3 -m
