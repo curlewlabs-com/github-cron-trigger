@@ -13,15 +13,25 @@ tests/live_check.py, not here.
 """
 
 import io
+import subprocess
 import tempfile
 import unittest
+from collections.abc import Sequence
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 
 from github_cron_trigger import steps, workflow_files
 from github_cron_trigger.cron_slots import UTC, UnsupportedCron, parse_cron
-from github_cron_trigger.github import HttpError, classify, transient
+from github_cron_trigger.github import (
+    RATE_LIMIT_DELAY_SECONDS,
+    RETRY_DELAYS_SECONDS,
+    HttpError,
+    classify,
+    gh_api,
+    rate_limited,
+    transient,
+)
 from github_cron_trigger.slot_ledger import (
     cron_segment,
     record_slot_key,
@@ -514,7 +524,8 @@ class GhFailureClassificationTest(unittest.TestCase):
     secondary-rate-limit and name-lookup lines are the forms GitHub and `gh`
     print for those failures. The unanswered-request lines are `gh api` output
     too: the timeouts from a clock host's log, with the repository renamed, and
-    the proxy line from pointing HTTPS_PROXY at a closed port.
+    the proxy line from pointing HTTPS_PROXY at a closed port. The cut-off
+    answer line is from the same clock host's log.
     """
 
     def test_refusals_are_not_retried(self) -> None:
@@ -530,16 +541,16 @@ class GhFailureClassificationTest(unittest.TestCase):
             with self.subTest(stderr=stderr):
                 self.assertEqual(classify(stderr)[0], status)
                 self.assertFalse(transient(*classify(stderr)))
+                self.assertFalse(rate_limited(*classify(stderr)))
 
     def test_busy_and_unreachable_are_retried(self) -> None:
         for stderr in (
             "gh: Server Error (HTTP 502)",
-            "gh: API rate limit exceeded (HTTP 429)",
-            (
-                "gh: You have exceeded a secondary rate limit. Please wait a few"
-                " minutes before you try again. (HTTP 403)"
-            ),
             "error connecting to api.github.com\ncheck your internet connection",
+            # An answer that arrived empty or cut off, which gh reports with no
+            # status whether it came from a `--jq` read, a GraphQL query or an
+            # error body. Unretried, it cost a clock tick on the mark read.
+            "unexpected end of JSON input",
             # Requests gh sent and got no answer to. Unretried, one dropped
             # connection on the mark read cost a whole tick, since a tick
             # with no marks sends nothing.
@@ -565,6 +576,65 @@ class GhFailureClassificationTest(unittest.TestCase):
         ):
             with self.subTest(stderr=stderr):
                 self.assertTrue(transient(*classify(stderr)))
+                self.assertFalse(rate_limited(*classify(stderr)))
+
+    def test_rate_limits_are_told_apart_from_a_busy_api(self) -> None:
+        for stderr in (
+            "gh: API rate limit exceeded (HTTP 429)",
+            (
+                "gh: You have exceeded a secondary rate limit. Please wait a few"
+                " minutes before you try again. (HTTP 403)"
+            ),
+        ):
+            with self.subTest(stderr=stderr):
+                self.assertTrue(rate_limited(*classify(stderr)))
+                self.assertFalse(transient(*classify(stderr)))
+
+
+class GhRetryTest(unittest.TestCase):
+    """Which wait a failed `gh` call takes before its retry.
+
+    A busy or unreachable API is retried after short waits, so one lost answer
+    costs seconds rather than a failed run. A rate limit must wait GitHub's
+    documented minimum instead: the busy ladder's short waits would spend its
+    retries with no chance of clearing the limit, while sending the requests
+    GitHub warns can get an integration banned. Only `gh` itself is replaced,
+    by one that fails with each given stderr in turn and then answers.
+    """
+
+    ANSWER = "answer\n"
+    RATE_LIMIT = (
+        "gh: You have exceeded a secondary rate limit. Please wait a few minutes"
+        " before you try again. (HTTP 403)"
+    )
+
+    def call(self, *failures: str) -> str:
+        pending = list(failures)
+
+        def run(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+            if pending:
+                return subprocess.CompletedProcess(command, 1, "", pending.pop(0))
+            return subprocess.CompletedProcess(command, 0, self.ANSWER, "")
+
+        self.waits: list[float] = []
+        return gh_api(["repos/owner/name"], sleep=self.waits.append, run=run)
+
+    def test_a_cut_off_answer_is_retried_soon(self) -> None:
+        self.assertEqual(self.call("unexpected end of JSON input"), self.ANSWER)
+        self.assertEqual(self.waits, [RETRY_DELAYS_SECONDS[0]])
+
+    def test_a_busy_api_is_retried_until_its_ladder_is_spent(self) -> None:
+        busy = ["gh: Server Error (HTTP 502)"] * (len(RETRY_DELAYS_SECONDS) + 1)
+        with self.assertRaises(HttpError):
+            self.call(*busy)
+        self.assertEqual(self.waits, list(RETRY_DELAYS_SECONDS))
+
+    def test_a_rate_limit_waits_the_minimum_and_is_retried_once(self) -> None:
+        self.assertEqual(self.call(self.RATE_LIMIT), self.ANSWER)
+        self.assertEqual(self.waits, [RATE_LIMIT_DELAY_SECONDS])
+        with self.assertRaises(HttpError):
+            self.call(self.RATE_LIMIT, self.RATE_LIMIT)
+        self.assertEqual(self.waits, [RATE_LIMIT_DELAY_SECONDS])
 
 
 class LedgerPathTest(unittest.TestCase):

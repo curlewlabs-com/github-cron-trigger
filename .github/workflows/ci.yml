@@ -84,11 +84,12 @@ jobs:
     concurrency:
       group: live-check
       cancel-in-progress: false
-    # Holds the full retry ladder of a failing `gh` call (github.py's
-    # GH_TIMEOUT_SECONDS and RETRY_DELAYS_SECONDS) for the check and again for
-    # its cleanup, so an API outage ends in a failed step with its message
-    # rather than a job cancelled at the cap. The healthy path takes seconds.
-    timeout-minutes: 20
+    # Holds the full retries of a failing `gh` call (github.py's
+    # GH_TIMEOUT_SECONDS, RETRY_DELAYS_SECONDS and RATE_LIMIT_DELAY_SECONDS)
+    # for the check and again for its cleanup, so an API outage ends in a failed
+    # step with its message rather than a job cancelled at the cap. The healthy
+    # path takes seconds.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7.0.1
 

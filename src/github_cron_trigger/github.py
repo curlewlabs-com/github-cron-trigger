@@ -15,11 +15,17 @@ from collections.abc import Callable, Sequence
 # unattended clock tick open until an outer timeout kills it without a report.
 GH_TIMEOUT_SECONDS = 60
 
-# Waits between attempts on a transient failure, one attempt per entry plus a
-# final one. The first two ride out a gateway blip; the last is 60s because that
-# is GitHub's documented minimum wait after a secondary rate limit, so a shorter
-# final wait would spend the attempt with no chance of clearing it.
-RETRY_DELAYS_SECONDS = (5, 20, 60)
+# Waits between attempts on a busy or unreachable API, one attempt per entry
+# plus a final one. Most such failures are a single lost answer that the next
+# attempt gets, so the first waits are short; they level off so that an outage
+# still fails the call in under a minute of waiting.
+RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 10, 10, 10)
+
+# The wait before the one retry of a rate-limited call: GitHub's documented
+# minimum wait after a secondary rate limit. A shorter wait spends the retry
+# with no chance of clearing the limit, and GitHub warns that requests sent
+# while limited can get an integration banned.
+RATE_LIMIT_DELAY_SECONDS = 60
 
 # `gh api`'s stderr line for a failed HTTP request. The response body goes to
 # stdout and often carries the status too, but not every error body does, so
@@ -37,6 +43,13 @@ _GH_API_ERROR = re.compile(
 # before the same failure.
 _CONNECT_FAILURE = "error connecting to "
 _NO_ANSWER = re.compile(r'^(?:Get|Head|Post|Put|Patch|Delete) "[^"]*": ')
+
+# What gh prints when the answer it read was empty or cut off: Go's JSON decoder
+# ran out of input. gh decodes an answer before it reports a status whenever it
+# filters one with `--jq`, reads a GraphQL answer, or reads a JSON error body, so
+# this carries no status, and the request may have applied, as with one that got
+# no answer at all.
+_CUT_OFF_ANSWER = "unexpected end of JSON input"
 
 # GitHub answers a secondary rate limit with a 403 whose message says so. Every
 # other 403 is a refusal, so the message is the only way to tell them apart.
@@ -73,36 +86,57 @@ def classify(stderr: str) -> tuple[int | None, str]:
 
 
 def transient(status: int | None, message: str) -> bool:
-    """Whether a failure is worth retrying: the API was busy or unreachable."""
+    """Whether a failure is worth retrying soon: the API was busy or
+    unreachable, or its answer was lost."""
     if status is None:
-        return message.startswith(_CONNECT_FAILURE) or bool(_NO_ANSWER.match(message))
-    if status >= 500 or status == 429:
+        return (
+            message.startswith(_CONNECT_FAILURE)
+            or bool(_NO_ANSWER.match(message))
+            or message == _CUT_OFF_ANSWER
+        )
+    return status >= 500
+
+
+def rate_limited(status: int | None, message: str) -> bool:
+    """Whether GitHub refused a call for its rate limit, which waiting can clear."""
+    if status == 429:
         return True
     return status == 403 and _SECONDARY_RATE_LIMIT in message.lower()
 
 
-def gh_api(args: Sequence[str], sleep: Callable[[float], None] = time.sleep) -> str:
+def _run_gh(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        capture_output=True,
+        # gh writes UTF-8 whatever the host's locale, and a runner's locale is
+        # often C, which would refuse a workflow file's non-ASCII text.
+        encoding="utf-8",
+        timeout=GH_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+
+def gh_api(
+    args: Sequence[str],
+    sleep: Callable[[float], None] = time.sleep,
+    run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] = _run_gh,
+) -> str:
     """Run `gh api` with the given arguments and return its stdout.
 
-    Retries a transient failure on RETRY_DELAYS_SECONDS; any other failure, or a
-    transient one that outlasts the ladder, raises. A retried POST can find its
-    own earlier attempt already applied - slot_ledger.record treats the
-    resulting 422 as success for exactly that reason.
+    Retries a busy or unreachable API on RETRY_DELAYS_SECONDS, and a rate limit
+    once, after RATE_LIMIT_DELAY_SECONDS; any other failure, or one that
+    outlasts its retries, raises. A retried POST can find its own earlier
+    attempt already applied - slot_ledger.record treats the resulting 422 as
+    success for exactly that reason.
     """
     command = ["gh", "api", *args]
-    for delay in (*RETRY_DELAYS_SECONDS, None):
+    busy_waits = iter(RETRY_DELAYS_SECONDS)
+    rate_limit_waits = iter((RATE_LIMIT_DELAY_SECONDS,))
+    while True:
         try:
-            completed = subprocess.run(
-                command,
-                capture_output=True,
-                # gh writes UTF-8 whatever the host's locale, and a runner's
-                # locale is often C, which would refuse a workflow file's
-                # non-ASCII text.
-                encoding="utf-8",
-                timeout=GH_TIMEOUT_SECONDS,
-                check=False,
-            )
+            completed = run(command)
         except subprocess.TimeoutExpired:
+            delay = next(busy_waits, None)
             if delay is None:
                 raise GitHubError(
                     f"`{' '.join(command)}` timed out after {GH_TIMEOUT_SECONDS}s"
@@ -114,12 +148,17 @@ def gh_api(args: Sequence[str], sleep: Callable[[float], None] = time.sleep) -> 
         if completed.returncode == 0:
             return completed.stdout
         status, message = classify(completed.stderr)
-        if delay is None or not transient(status, message):
+        if rate_limited(status, message):
+            delay = next(rate_limit_waits, None)
+        elif transient(status, message):
+            delay = next(busy_waits, None)
+        else:
+            delay = None
+        if delay is None:
             if status is None:
                 raise GitHubError(f"`{' '.join(command)}` failed: {message}")
             raise HttpError(status, message)
         sleep(delay)
-    raise AssertionError("unreachable: the retry loop returns or raises")
 
 
 def check_repo(repo: str) -> str:
