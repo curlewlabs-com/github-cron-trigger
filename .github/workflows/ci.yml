@@ -89,7 +89,7 @@ jobs:
     # for the check and again for its cleanup, so an API outage ends in a failed
     # step with its message rather than a job cancelled at the cap. The healthy
     # path takes seconds.
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
 

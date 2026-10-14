@@ -13,7 +13,13 @@ from collections.abc import Callable, Sequence
 
 # Bound on every `gh` call, so a stalled socket cannot hold a workflow step or an
 # unattended clock tick open until an outer timeout kills it without a report.
-GH_TIMEOUT_SECONDS = 60
+# GitHub ends any request that takes it more than 10 seconds to process, and
+# these calls are single requests or a page or two, so a healthy call finishes
+# well inside this. It is spent once per attempt, which makes it the larger part
+# of how long a failing call can take; a caller sizing a job timeout around a
+# call counts every attempt RETRY_DELAYS_SECONDS and RATE_LIMIT_DELAY_SECONDS
+# allow.
+GH_TIMEOUT_SECONDS = 30
 
 # Waits between attempts on a busy or unreachable API, one attempt per entry
 # plus a final one. Most such failures are a single lost answer that the next
