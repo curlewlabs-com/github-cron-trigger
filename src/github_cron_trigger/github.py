@@ -27,11 +27,14 @@ RETRY_DELAYS_SECONDS = (1, 2, 4, 8, 10, 10, 10)
 # while limited can get an integration banned.
 RATE_LIMIT_DELAY_SECONDS = 60
 
-# `gh api`'s stderr line for a failed HTTP request. The response body goes to
+# `gh api`'s stderr line for a failed HTTP request: the error body's message
+# and the status, or the status alone when the body held no message gh could
+# read, as a 5xx with an empty or non-JSON body does. The response body goes to
 # stdout and often carries the status too, but not every error body does, so
 # the stderr line is what classification reads.
 _GH_API_ERROR = re.compile(
-    r"^gh: (?P<message>.*) \(HTTP (?P<status>\d{3})\)$", re.MULTILINE
+    r"^gh: (?:(?P<message>.*) \(HTTP (?P<status>\d{3})\)|HTTP (?P<bare>\d{3}))$",
+    re.MULTILINE,
 )
 
 # The failures that carry no status, because `gh` got no answer. A failed name
@@ -66,7 +69,7 @@ class HttpError(GitHubError):
     """GitHub answered with a non-success status after any retries."""
 
     def __init__(self, status: int, message: str) -> None:
-        super().__init__(f"HTTP {status}: {message}")
+        super().__init__(f"HTTP {status}: {message}" if message else f"HTTP {status}")
         self.status = status
         self.message = message
 
@@ -74,15 +77,17 @@ class HttpError(GitHubError):
 def classify(stderr: str) -> tuple[int | None, str]:
     """The HTTP status and message of a failed `gh api` call, from its stderr.
 
-    The status is None when `gh` reported no HTTP exchange (a connection
-    failure, or a failure before any request); the message is then the whole
-    stderr.
+    The status is None when `gh` reported none (a connection failure, an
+    answer it could not decode, or a failure before any request); the message
+    is then the whole stderr. A status reported without a message has an empty
+    one.
     """
     text = stderr.strip()
     match = _GH_API_ERROR.search(text)
     if match is None:
         return None, text
-    return int(match.group("status")), match.group("message")
+    status = match.group("status") or match.group("bare")
+    return int(status), match.group("message") or ""
 
 
 def transient(status: int | None, message: str) -> bool:

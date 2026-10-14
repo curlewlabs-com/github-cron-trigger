@@ -525,7 +525,8 @@ class GhFailureClassificationTest(unittest.TestCase):
     print for those failures. The unanswered-request lines are `gh api` output
     too: the timeouts from a clock host's log, with the repository renamed, and
     the proxy line from pointing HTTPS_PROXY at a closed port. The cut-off
-    answer line is from the same clock host's log.
+    answer line is from the same clock host's log, and the bare 500 from a live
+    check's ref delete.
     """
 
     def test_refusals_are_not_retried(self) -> None:
@@ -546,6 +547,9 @@ class GhFailureClassificationTest(unittest.TestCase):
     def test_busy_and_unreachable_are_retried(self) -> None:
         for stderr in (
             "gh: Server Error (HTTP 502)",
+            # A 5xx whose body held no message: gh prints the status alone.
+            # Read as status-less, it failed a ref delete on the first attempt.
+            "gh: HTTP 500",
             "error connecting to api.github.com\ncheck your internet connection",
             # An answer that arrived empty or cut off, which gh reports with no
             # status whether it came from a `--jq` read, a GraphQL query or an
