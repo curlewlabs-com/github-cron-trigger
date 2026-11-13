@@ -119,6 +119,10 @@ and what other workflows declare).
 can push to the repository. In its own job, holding nothing else, that grant is
 never in reach of the work's steps or of anything they install.
 
+**Add the check action to your pull request checks** ("Checking workflow
+files"). A workflow the clock or the slot action refuses otherwise merges green
+and then fails on every tick and every scheduled run.
+
 ### The slot action's outputs
 
 - `scheduled`: `true` for a `schedule` or `repository_dispatch` delivery, or a
@@ -143,11 +147,46 @@ workflow that uses the slot action must fire at most once a day**: a single
 minute and a single hour. A `schedule` delivery of a line that fires more often
 is refused rather than attributed to whichever of its instants happens to be
 latest, and the clock reports such a workflow instead of delivering it. A
-dispatched slot is always exact.
+dispatched slot is always exact. Both refusals name the lines to write instead,
+and the check action catches the mistake before it merges ("Checking workflow
+files").
 
 A workflow can carry several lines, each with its own slots. A weekly line and
 a daily line that fire in the same minute are separate slots with separate
 records.
+
+### Running more often than daily
+
+Write one line per instant of the day instead of one line that fires several
+times. GitHub names the line that fired, so each line's late delivery is still
+attributable:
+
+```yaml
+on:
+  schedule:
+    # Hourly at :17, one line per hour, because each line must fire at most
+    # once a day.
+    - cron: "17 0 * * *"
+    - cron: "17 1 * * *"
+    # ... one line for each hour in between ...
+    - cron: "17 23 * * *"
+  repository_dispatch:
+    types: [github-cron-trigger/probe.yml]
+```
+
+These lines fire at exactly the instants `17 * * * *` does, and the clock
+delivers each slot on time as before. What changes is that each line is its own
+line:
+
+- Each line has its own records in the ledger, and `missed` reports each line
+  on its own.
+- Nothing can chain off the workflow through `workflow_run`, because a chained
+  run cannot tell which of its parent's lines fired ("Chained workflows").
+
+A line that fires every few minutes would need hundreds of lines. A job that
+runs that often is usually safe to repeat, and is better enrolled as a
+reconciler ("Enrolling a reconciler"), which needs no slot action and may fire
+as often as it likes.
 
 ### Recording in parts
 
@@ -201,7 +240,9 @@ parent that was not a scheduled delivery leaves the chained run unscheduled.
 
 The parent must carry exactly one `cron:` line, because a run does not say
 which line fired it, and that line must fire at most once a day, for the same
-reason as a `schedule` delivery.
+reason as a `schedule` delivery. So a parent split into one line per instant
+("Running more often than daily") cannot be chained off. Have the work run in
+the parent's own jobs instead.
 
 Re-delivering a chained slot through its parent works only while that slot is
 still the parent line's newest, because the chained run takes the parent
@@ -288,6 +329,47 @@ skips PR runs, so it needs no PR group.
 
 A PR run that touches what the deliveries guard, such as a plan that reads a
 live state lock, stays in the shared workflow-level group instead.
+
+## Checking workflow files
+
+The clock reads the default branch, and the slot action reads a workflow only
+when one of its deliveries arrives. So a workflow either one refuses can merge
+green and fail afterwards, on every tick and every scheduled run. The check
+action reads the checkout's workflow files with the same parser and the same
+rules, and fails the job if there is a problem:
+
+```yaml
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  cron-trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: curlewlabs-com/github-cron-trigger/check@v0
+```
+
+It names, for each file in `.github/workflows` (or the directory the
+`workflows` input gives):
+
+- a file that cannot be read as one workflow;
+- in an enrolled workflow, whatever the clock refuses: a dispatch type naming
+  another file, no `cron:` line, a refused line, and, when the workflow runs
+  the slot action, a line firing more than once a day;
+- in a workflow that runs the slot action without enrolling, a line the slot
+  action refuses, since GitHub's own `schedule` still delivers it;
+- in a chained workflow that runs the slot action, a parent whose line it
+  cannot attribute.
+
+It reads nothing from GitHub and needs no token. The same check runs outside
+Actions, from a checkout's root:
+
+```sh
+python3 -m github_cron_trigger check
+```
 
 ## The clock
 
@@ -481,6 +563,8 @@ an every-minute line runs is set by how often the clock ticks.
   [mikefarah's yq](https://github.com/mikefarah/yq) v4.53.4 or newer on PATH.
   The done action needs only `python3` and `gh`. GitHub's hosted runners have
   all three, and neither action needs a checkout.
+- **Runners** (the check action): `python3` and yq as above, after a checkout
+  of the repository whose workflows it reads. It needs no `gh` and no token.
 - **yq, on a self-hosted runner.** Install it once, as you would any tool the
   runner uses: Homebrew's `yq` formula is mikefarah's, and the project's
   releases page has a binary for every platform. The apt package named `yq` on

@@ -178,6 +178,15 @@ class ResolveTest(unittest.TestCase):
             with self.subTest(cron=cron), self.assertRaises(SlotError):
                 resolve("schedule", "", "", cron, utc_lines(cron), None, NOW)
 
+    def test_the_sub_daily_refusal_names_the_lines_to_write(self) -> None:
+        # The refusal is where a person first meets the rule, so it says what to
+        # write instead rather than leaving them to work the split out.
+        with self.assertRaises(SlotError) as raised:
+            resolve(
+                "schedule", "", "", "0 1,13 * * *", utc_lines("0 1,13 * * *"), None, NOW
+            )
+        self.assertIn("('0 1 * * *', '0 13 * * *')", str(raised.exception))
+
     def test_schedule_without_its_line_is_refused(self) -> None:
         with self.assertRaises(SlotError):
             resolve("schedule", "", "", "", utc_lines(DAILY), None, NOW)

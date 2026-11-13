@@ -229,6 +229,31 @@ class CronSchedule:
             and day.isoweekday() % 7 in self.weekdays
         )
 
+    def once_a_day_lines(self) -> tuple[str, ...]:
+        """Lines that each fire at most once a day and together fire exactly
+        when this one does: one per hour and minute it names, in the order they
+        come in a day, each on this line's days. Each is its own line, with its
+        own slots and records. The day fields stay as written, since these are
+        lines for a person to paste in place of the original."""
+        days = " ".join(self.expression.split()[2:])
+        return tuple(
+            f"{minute} {hour} {days}" for hour in self.hours for minute in self.minutes
+        )
+
+
+def split_advice(schedule: CronSchedule) -> str:
+    """What to write instead of a line that fires more than once a day, for a
+    refusal to end with. The lines are spelled out, since writing them is the
+    whole fix; a long list shows its first two and its last."""
+    lines = schedule.once_a_day_lines()
+    quoted = [repr(line) for line in lines]
+    shown = quoted if len(quoted) <= 4 else [*quoted[:2], "...", quoted[-1]]
+    return (
+        f"split it into {len(lines)} lines that each fire once a day"
+        f" ({', '.join(shown)}), as the README's"
+        ' "Running more often than daily" shows'
+    )
+
 
 def parse_cron(expression: str) -> CronSchedule:
     """Parse a cron expression in the accepted grammar, or raise UnsupportedCron."""

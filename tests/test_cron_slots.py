@@ -27,6 +27,7 @@ from github_cron_trigger.cron_slots import (
     parse_ledger_key,
     parse_slot,
     slots_between,
+    split_advice,
 )
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -356,6 +357,49 @@ class ScheduleShapeTest(unittest.TestCase):
         self.assertFalse(parse_cron("7,27,47 * * * *").fires_at_most_daily)
         self.assertFalse(parse_cron("0 1,13 * * *").fires_at_most_daily)
         self.assertFalse(parse_cron("0,30 1 * * *").fires_at_most_daily)
+
+    def test_once_a_day_lines_fire_exactly_when_the_line_does(self) -> None:
+        # These are what a refusal tells a slot-action workflow to write in
+        # place of a line firing more than once a day; a set that drops, adds or
+        # moves an instant would have it skip or redo work after the fix.
+        after, until = utc(2026, 2, 27, 0, 0), utc(2026, 3, 3, 0, 0)
+        for expression in (
+            "17 * * * *",
+            "7,27,47 * * * *",
+            "0,30 1 * * 1-5",
+            "*/20 9-17 1 * *",
+            "0 1,13 * * SUN",
+            "30 19 * * *",
+        ):
+            with self.subTest(expression=expression):
+                schedule = parse_cron(expression)
+                lines = [parse_cron(line) for line in schedule.once_a_day_lines()]
+                self.assertTrue(all(line.fires_at_most_daily for line in lines))
+                split = sorted(
+                    slot for line in lines for slot in slots_between(line, after, until)
+                )
+                self.assertEqual(split, slots_between(schedule, after, until))
+
+    def test_once_a_day_lines_come_in_the_order_of_a_day(self) -> None:
+        self.assertEqual(
+            parse_cron("0,30 1,13 * * 1-5").once_a_day_lines(),
+            ("0 1 * * 1-5", "30 1 * * 1-5", "0 13 * * 1-5", "30 13 * * 1-5"),
+        )
+        self.assertEqual(parse_cron("30 19 * * *").once_a_day_lines(), ("30 19 * * *",))
+
+    def test_split_advice_spells_out_the_lines(self) -> None:
+        self.assertIn(
+            "split it into 2 lines that each fire once a day"
+            " ('0 1 * * *', '30 1 * * *')",
+            split_advice(parse_cron("0,30 1 * * *")),
+        )
+        # A long list keeps its first two and its last, so the pattern shows
+        # without the message running to hundreds of lines.
+        self.assertIn(
+            "split it into 24 lines that each fire once a day"
+            " ('17 0 * * *', '17 1 * * *', ..., '17 23 * * *')",
+            split_advice(parse_cron("17 * * * *")),
+        )
 
     def test_occurrence_is_exact(self) -> None:
         daily = parse_cron("0 1 * * *")
