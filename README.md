@@ -520,6 +520,10 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
 
 A workflow whose records, schedule or parent's line cannot be read is reported
 as not judged, never as missing every slot, and the run does not pass on it.
+So is every line a workflow is enrolled for when the clock's starts cannot be
+read: a start can reach back past the oldest record, so the records alone could
+pass a line that missed a slot. The misses its records do show are still
+named.
 The exit status is a bit set, so neither finding hides the other: 1 when a due
 slot has no record, 2 when anything could not be read, 0 when everything was
 read and no slot was missed. Run it daily, from the clock's host or from a

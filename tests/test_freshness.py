@@ -537,27 +537,39 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(workflow_file, "audit.yml")
         self.assertIn("chained line", reason)
 
-    def test_starts_that_cannot_be_read_leave_recorded_lines_judged(self) -> None:
+    def test_starts_that_cannot_be_read_judge_no_own_line(self) -> None:
+        # The line's start may reach back past its oldest record (the 23rd
+        # here), so judged from the records alone a slot missed between them
+        # would vanish, and a caller would read the line as recovered and close
+        # what it filed. The line is reported instead; the miss its records do
+        # show (the 26th) is still named, since it is real; and a chained line,
+        # which never reads a start, is judged as before.
         def failing(_repo: str) -> list[Start]:
             raise GitHubError("gh: Server Error (HTTP 502)")
 
         documents = {
-            "backup.yml": document(),
-            "fresh.yml": document(workflow_file="fresh.yml", cron="0 7 * * *"),
+            "backup.yml": named("Backup", document()),
+            "audit.yml": chained(),
+        }
+        record_names = {
+            "backup.yml": records(25, 27, 28),
+            "audit.yml": records(*range(22, 29)),
         }
         report = check(
             "owner/name",
             documents,
             NOW,
-            records=lambda _repo, workflow_file: (
-                records(*range(22, 29)) if workflow_file == "backup.yml" else []
-            ),
+            records=lambda _repo, workflow_file: record_names[workflow_file],
             starts=failing,
         )
-        self.assertEqual(report.judged, (("backup.yml", DAILY),))
+        self.assertEqual(report.judged, (("audit.yml", DAILY),))
         ((workflow_file, reason),) = report.unreadable
-        self.assertEqual(workflow_file, "fresh.yml")
-        self.assertIn("starts could not be read", reason)
+        self.assertEqual(workflow_file, "backup.yml")
+        self.assertIn("is not judged: the clock's starts could not be read", reason)
+        self.assertEqual(
+            [(line.workflow_file, line.slots) for line in report.missed],
+            [("backup.yml", (utc(2026, 9, 26, 19, 30),))],
+        )
 
     def test_an_enrolled_workflow_that_cannot_be_read_is_reported(self) -> None:
         # Enrolled with a line firing twice a day and the slot action: the
