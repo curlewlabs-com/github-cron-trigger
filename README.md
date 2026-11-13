@@ -415,6 +415,21 @@ and the slot action reads it; marks record slots a clock sent, for every
 enrolled workflow, reconcilers included, and only clocks read them. A tick keeps
 each line's two newest marks and removes the rest.
 
+Each line of an enrolled workflow that runs the slot action also gets a
+**start** when a clock first takes it up:
+
+```text
+refs/github-cron-trigger-clock/<workflow file>/<cron line>/start/<YYYYMMDDTHHMMZ>
+```
+
+It names the line's latest slot at that tick, and every later slot is owed a
+record, so `missed` judges the line from its start whether or not any delivery
+of it has succeeded yet ("Missed slots"). Starts are never pruned with the
+marks. A start goes only when its line stops being one a clock takes up: the
+workflow is disenrolled, the line changes, or the slot action is dropped. Taking
+the line up again starts it again. A line a clock served before starts existed
+gets one on the next tick.
+
 ### How it behaves
 
 - **Baselines.** A line no clock has marked is baselined - its latest slot is
@@ -488,9 +503,16 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
 
 - A slot counts as due once `GRACE` (12 hours) has passed since it, so one
   still in flight is not named.
-- A line is checked only from its oldest record on, so slots from before it
-  enrolled are not misses, and a line that has never recorded is not checked
-  yet.
+- A line is checked from its start (when a clock first took it up; "What it
+  remembers, and where") or from its oldest record, whichever is older. Slots
+  from before then are not misses. A line is judged from its start whether or
+  not any delivery of it has ever succeeded, so a line whose every delivery
+  fails is named.
+- A chained line has no start, since no clock takes a chained workflow up, so
+  it is checked from its oldest record.
+- A line with neither a start nor a record is reported as not judged, and the
+  run does not pass on it. That is a line no clock has served yet, or a chained
+  line whose workflow has never recorded.
 - A record of any part of the slot counts as delivered.
 - The window reaches back `LOOKBACK` (7 days).
 
