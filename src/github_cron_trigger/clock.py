@@ -40,7 +40,7 @@ do, and writes nothing: no mark, no dispatch, no clean-up.
 import argparse
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Protocol
 
 from . import default_branch, slot_ledger, yq
@@ -317,42 +317,73 @@ def started_lines(workflows: Sequence[ScheduledWorkflow]) -> set[tuple[str, str]
     }
 
 
-def missing_starts(
-    workflows: Sequence[ScheduledWorkflow], starts: Iterable[Start], now: datetime
-) -> list[Start]:
-    """A start, at the line's latest slot, for each line a clock takes up that
-    has none yet."""
-    have = {(start.workflow_file, start.segment) for start in starts}
-    return [
-        start_for(workflow.workflow_file, schedule, latest_slot(schedule, now))
-        for workflow in workflows
-        if workflow.enrolled and workflow.records
-        for schedule in workflow.schedules
-        if (workflow.workflow_file, cron_segment(schedule)) not in have
-    ]
+@dataclass(frozen=True)
+class StartChanges:
+    """What a tick does to the starts: the ones it writes, before any slot is
+    sent, and the ones it removes."""
+
+    writes: tuple[Start, ...]
+    removals: tuple[Start, ...]
 
 
-def stale_starts(
+def start_changes(
     workflows: Sequence[ScheduledWorkflow],
+    steps: Sequence[Step],
     starts: Iterable[Start],
+    now: datetime,
     unjudged: Collection[str] = (),
-) -> list[Start]:
-    """The starts a tick removes: every start of a line no clock takes up any
-    more, and, of a line's starts, all but the oldest. A workflow file in
-    `unjudged` keeps its starts, for the reason stale_marks keeps its marks:
-    removed, its lines would start again later, and the slots between would go
-    unjudged."""
-    current = started_lines(workflows)
+) -> StartChanges:
+    """The starts this tick's steps need, worked out before any of them runs.
+
+    A line's start is the slot after which every slot is owed a record, and its
+    newest start is the one the missed-slot check reads, so:
+
+    - A line this tick baselines is being taken up afresh - no clock has a mark
+      of it - and starts at the baselined slot, which is not sent. Any start it
+      already has is from an earlier time it was taken up, and goes.
+    - A line with no start that this tick delivers starts at the slot before
+      the one it sends, so that send's slot is judged: a failed delivery of it
+      is then named, not passed over.
+    - A line with no start and nothing to do starts at its latest slot, which a
+      clock already dealt with before starts existed.
+    - Of a line's starts, all but the newest go, and so does every start of a
+      line no clock takes up any more, unless its workflow file is in
+      `unjudged` (as stale_marks keeps marks): removed, the line would start
+      again later, and the slots between would go unjudged.
+    """
     by_line: dict[tuple[str, str], list[Start]] = {}
     for start in starts:
-        if start.workflow_file in unjudged:
-            continue
         by_line.setdefault((start.workflow_file, start.segment), []).append(start)
-    stale: list[Start] = []
+    step_for = {
+        (step.workflow.workflow_file, cron_segment(step.schedule)): step
+        for step in steps
+    }
+    writes: list[Start] = []
+    removals: list[Start] = []
+    current = started_lines(workflows)
+    for workflow in workflows:
+        if not (workflow.enrolled and workflow.records):
+            continue
+        for schedule in workflow.schedules:
+            line = (workflow.workflow_file, cron_segment(schedule))
+            have = sorted(by_line.get(line, []), key=lambda start: start.slot)
+            step = step_for.get(line)
+            if step is not None and step.kind == "baseline":
+                fresh = start_for(workflow.workflow_file, schedule, step.slot)
+                if fresh not in have:
+                    writes.append(fresh)
+                removals.extend(start for start in have if start != fresh)
+            elif not have:
+                slot = latest_slot(schedule, now)
+                if step is not None:
+                    slot = latest_slot(schedule, step.slot - timedelta(minutes=1))
+                writes.append(start_for(workflow.workflow_file, schedule, slot))
+            else:
+                removals.extend(have[:-1])
     for line, line_starts in sorted(by_line.items()):
-        ordered = sorted(line_starts, key=lambda start: start.slot)
-        stale.extend(ordered if line not in current else ordered[1:])
-    return stale
+        if line not in current and line[0] not in unjudged:
+            removals.extend(line_starts)
+    return StartChanges(tuple(writes), tuple(removals))
 
 
 def tick(
@@ -389,10 +420,25 @@ def tick(
         # repeat a slot, so this tick sends nothing.
         problems.append(f"cannot read the clock's marks: {exc}")
         return problems
-    for step in plan(workflows, marks, now):
+    try:
+        starts = remote.read_starts(repo)
+    except (GitHubError, ValueError) as exc:
+        # With no starts there is no telling which lines need one before their
+        # next send, and a send with no start before it can fail unjudged.
+        problems.append(f"cannot read the clock's starts: {exc}")
+        return problems
+    steps = plan(workflows, marks, now)
+    changes = start_changes(workflows, steps, starts, now, unjudged)
+    unstarted = write_starts(repo, changes, send, remote, problems)
+    for step in steps:
         workflow_file = step.workflow.workflow_file
         what = f"{workflow_file} cron {step.schedule.canonical!r} slot {format_slot(step.slot)}"
         mark = mark_for(workflow_file, step.schedule, step.slot)
+        if (workflow_file, cron_segment(step.schedule)) in unstarted:
+            # Sent now, the slot would come before any start and never be
+            # judged; the next tick writes the start and sends it.
+            problems.append(f"{what}: not sent, since the line's start was not written")
+            continue
         if not send:
             verb = "would baseline" if step.kind == "baseline" else "would send"
             print(f"clock: {what}: {verb} (dry run)")
@@ -437,28 +483,23 @@ def tick(
             print(f"clock: removing {len(stale)} old mark(s) failed: {exc}")
     elif stale:
         print(f"clock: would remove {len(stale)} old mark(s) (dry run)")
-    problems += keep_starts(repo, workflows, now, send, remote, unjudged)
+    remove_starts(repo, changes, send, remote)
     return problems
 
 
-def keep_starts(
+def write_starts(
     repo: str,
-    workflows: Sequence[ScheduledWorkflow],
-    now: datetime,
+    changes: StartChanges,
     send: bool,
     remote: Remote,
-    unjudged: Collection[str],
-) -> list[str]:
-    """Give each line a clock takes up its start, and remove the starts no line
-    needs. Deliveries do not wait on this, but the missed-slot check does, so a
-    failure is a problem rather than housekeeping: a line with no start is not
-    judged until it records."""
-    try:
-        starts = remote.read_starts(repo)
-    except (GitHubError, ValueError) as exc:
-        return [f"cannot read the clock's starts: {exc}"]
-    problems: list[str] = []
-    for start in missing_starts(workflows, starts, now):
+    problems: list[str],
+) -> set[tuple[str, str]]:
+    """Write the starts this tick needs, and return the lines whose start could
+    not be written, keyed (workflow file, segment). Their slots wait for a tick
+    that writes it. A failure is a problem, not housekeeping: the missed-slot
+    check judges a line only from its start or a record."""
+    unstarted: set[tuple[str, str]] = set()
+    for start in changes.writes:
         what = f"{start.workflow_file} line {start.segment}"
         if not send:
             print(f"clock: {what}: would start at {format_slot(start.slot)} (dry run)")
@@ -467,19 +508,22 @@ def keep_starts(
             remote.create_start(repo, start)
         except (GitHubError, ValueError) as exc:
             problems.append(f"{what}: writing its start failed: {exc}")
+            unstarted.add((start.workflow_file, start.segment))
             continue
         print(f"clock: {what}: started at {format_slot(start.slot)}")
-    stale = stale_starts(workflows, starts, unjudged)
-    if stale and send:
+    return unstarted
+
+
+def remove_starts(repo: str, changes: StartChanges, send: bool, remote: Remote) -> None:
+    if changes.removals and send:
         try:
-            remote.remove_starts(repo, stale)
+            remote.remove_starts(repo, changes.removals)
         except (GitHubError, ValueError) as exc:
-            # A start left behind for a line nobody takes up is never read; the
-            # next tick tries again.
-            print(f"clock: removing {len(stale)} old start(s) failed: {exc}")
-    elif stale:
-        print(f"clock: would remove {len(stale)} old start(s) (dry run)")
-    return problems
+            # The newest start is the one read, so an older one left behind
+            # changes nothing, and the next tick tries again.
+            print(f"clock: removing {len(changes.removals)} old start(s) failed: {exc}")
+    elif changes.removals:
+        print(f"clock: would remove {len(changes.removals)} old start(s) (dry run)")
 
 
 def _parser() -> argparse.ArgumentParser:

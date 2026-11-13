@@ -33,10 +33,10 @@ What counts, and why each bound:
   measured starting more than six and a half hours late, and a delivery then
   takes its own run time, so a slot inside GRACE may still be in flight rather
   than missed.
-- A line is checked from its start: the slot at which a clock first took it
-  up (clock_marks.py), or its oldest record if that is older. Slots before
-  then are not misses, since the line was not yet owed them, and a line is
-  judged from its start whether or not any delivery of it has succeeded yet. A
+- A line is checked from its newest start (clock_marks.py), or its oldest
+  record if that is older. Slots before then are not misses, since the line
+  was not yet owed them, and a line is judged from its start whether or not
+  any delivery of it has succeeded yet. A
   chained line has no start of its own - no clock takes a chained workflow up -
   so it is judged from its oldest record. A line with neither is reported as
   not judged, never passed over: one whose every delivery fails would
@@ -324,11 +324,14 @@ def missed_lines(
 
 
 def starts_by_line(starts: Sequence[Start]) -> dict[str, dict[str, datetime]]:
-    """The oldest start of each line, by workflow file and then line segment."""
+    """The newest start of each line, by workflow file and then line segment.
+    The newest is from the latest time a clock took the line up; an older one
+    is from an earlier time, left behind by a removal that failed, and judging
+    from it would count the slots in between as missed."""
     by_line: dict[str, dict[str, datetime]] = {}
     for start in starts:
         lines = by_line.setdefault(start.workflow_file, {})
-        if start.segment not in lines or start.slot < lines[start.segment]:
+        if start.segment not in lines or start.slot > lines[start.segment]:
             lines[start.segment] = start.slot
     return by_line
 
