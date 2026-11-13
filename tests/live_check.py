@@ -15,8 +15,8 @@ establish, and this checks each piece:
 - a part record sits beside the slot's own record without colliding with it;
 - another cron line's record for the same instant is a separate record;
 - the prefix listing returns this workflow's records and nothing else's;
-- prune removes records before its cutoff, keeping later ones and each line's
-  newest, and deleting an already-deleted record is not an error.
+- prune removes records before its cutoff and keeps later ones, and deleting an
+  already-deleted record is not an error.
 
 Everything is written under a workflow name unique to the run, so concurrent
 checks cannot collide, and removed again whatever the outcome.
@@ -133,13 +133,17 @@ def run(repo: str, sha: str, workflow_file: str) -> None:
     )
     removed = slot_ledger.prune(repo, workflow_file, LATE)
     _expect(
-        removed == ["0_0_x_x_x/20000101T0000Z", "0_0_x_x_x/20000101T0000Z.leg"],
-        f"prune removes the records before its cutoff ({removed})",
+        removed
+        == [
+            "0_0_x_x_6/20000101T0000Z",
+            "0_0_x_x_x/20000101T0000Z",
+            "0_0_x_x_x/20000101T0000Z.leg",
+        ],
+        f"prune removes the records before its cutoff, across lines ({removed})",
     )
     _expect(
-        slot_ledger.records(repo, workflow_file)
-        == ["0_0_x_x_6/20000101T0000Z", "0_0_x_x_x/20000102T0000Z"],
-        "prune keeps the record at its cutoff, and each line's newest",
+        slot_ledger.records(repo, workflow_file) == ["0_0_x_x_x/20000102T0000Z"],
+        "prune keeps the record at its cutoff",
     )
     slot_ledger.delete(repo, workflow_file, "0_0_x_x_x/20000101T0000Z")
     print("ok: deleting an already-deleted record is not an error")

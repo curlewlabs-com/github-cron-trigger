@@ -246,41 +246,19 @@ def record_slot_key(record_name: str) -> str | None:
     return match.group("key") if match else None
 
 
-def prunable(record_names: list[str], before: datetime) -> list[str]:
-    """The records `prune` deletes: those for slots before `before`, except
-    each line's newest slot, whose records (every part of it) stay.
+def prune(repo: str, workflow_file: str, before: datetime) -> list[str]:
+    """Delete one workflow's records for slots before `before`; return them.
 
-    A line's newest record is what says it has ever succeeded. Pruned, a line
-    that fires less often than records are kept - a yearly line beside a daily
-    one, whose deliveries prune the workflow's records - would read as one
-    that never recorded, which the missed-slot check reports. A record not in
-    the ledger's own form is left alone: this only removes what the ledger
-    itself wrote.
+    Covers every cron line of the workflow. A record not in the ledger's own
+    form is left alone: this only removes what the ledger itself wrote.
     """
     cutoff = ledger_key(before)
-    newest: dict[str, str] = {}
-    keyed: list[tuple[str, str, str]] = []
-    for record_name in record_names:
-        match = _RECORD.match(record_name)
-        if match is None:
-            continue
-        segment, key = match.group("segment"), match.group("key")
-        keyed.append((record_name, segment, key))
+    removed = []
+    for record_name in records(repo, workflow_file):
+        key = record_slot_key(record_name)
         # The key format sorts lexically in time order, so string comparison is
         # slot order.
-        if segment not in newest or key > newest[segment]:
-            newest[segment] = key
-    return [
-        record_name
-        for record_name, segment, key in keyed
-        if key < cutoff and key != newest[segment]
-    ]
-
-
-def prune(repo: str, workflow_file: str, before: datetime) -> list[str]:
-    """Delete one workflow's records that prunable chooses; return them.
-    Covers every cron line of the workflow."""
-    removed = prunable(records(repo, workflow_file), before)
-    for record_name in removed:
-        delete(repo, workflow_file, record_name)
+        if key is not None and key < cutoff:
+            delete(repo, workflow_file, record_name)
+            removed.append(record_name)
     return removed

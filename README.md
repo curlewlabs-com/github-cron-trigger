@@ -493,10 +493,7 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
 - A line with no record at all is reported as not judged, and the run does not
   pass on it: no delivery of it has succeeded yet. That is either a line just
   enrolled, until its first slot is done, or one whose every delivery fails,
-  which would otherwise never be named. Once a line records, slots it missed
-  before that first record are not named. Pruning keeps each line's newest
-  record however old, so a line that fires less often than records are kept
-  still shows that it has succeeded.
+  which would otherwise never be named.
 - A record of any part of the slot counts as delivered.
 - The window reaches back `LOOKBACK` (7 days).
 
@@ -530,8 +527,7 @@ either does owed work twice or skips it silently:
 
 The record step prunes its workflow's records older than 60 days
 (`RECORD_RETENTION` in `steps.py`), a window far longer than any delivery delay
-it has to absorb, except each line's newest, which stays as the record that the
-line has succeeded ("Missed slots").
+it has to absorb.
 
 ## Accepted cron grammar
 
