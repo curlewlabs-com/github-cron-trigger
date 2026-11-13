@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 from github_cron_trigger import workflow_files, yq
+from github_cron_trigger.clock_marks import Start, start_for
 from github_cron_trigger.cron_slots import UTC, parse_cron
 from github_cron_trigger.freshness import (
     EXIT_INCOMPLETE,
@@ -37,6 +38,11 @@ BACKUP = [LedgeredLine(DAILY, "backup.yml")]
 # 2026-09-29 12:00 UTC: the 28th's 19:30 slot is 16h30m old, past GRACE; the
 # 29th's has not come yet.
 NOW = datetime(2026, 9, 29, 12, 0, tzinfo=UTC)
+
+
+def no_starts(_repo: str) -> list[Start]:
+    """A repository no clock has started a line in."""
+    return []
 
 
 def utc(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
@@ -94,10 +100,46 @@ class MissedLinesTest(unittest.TestCase):
             missed_lines("backup.yml", BACKUP, records(26, 27, 28), NOW), []
         )
 
-    def test_a_line_that_never_recorded_is_not_checked(self) -> None:
-        # Nothing tells a line that just enrolled from one whose every delivery
-        # failed, so neither is reported yet.
+    def test_a_line_with_no_record_and_no_start_names_no_slot(self) -> None:
+        # With no boundary there is no telling which slots were owed; check()
+        # reports such a line as not judged instead.
         self.assertEqual(missed_lines("backup.yml", BACKUP, [], NOW), [])
+
+    def test_a_line_that_never_recorded_is_judged_from_its_start(self) -> None:
+        # Every delivery failed since a clock took the line up on the 25th: the
+        # failure a check from the first record never names.
+        started = {"30_19_x_x_x": utc(2026, 9, 25, 19, 30)}
+        missed = missed_lines("backup.yml", BACKUP, [], NOW, started=started)
+        self.assertEqual(
+            missed[0].slots,
+            tuple(utc(2026, 9, day, 19, 30) for day in (26, 27, 28)),
+        )
+
+    def test_the_older_of_start_and_record_opens_the_line(self) -> None:
+        # Recorded before any clock served it (GitHub's schedule alone), then
+        # started later: the records reach further back.
+        late_start = {"30_19_x_x_x": utc(2026, 9, 26, 19, 30)}
+        missed = missed_lines(
+            "backup.yml", BACKUP, records(23, 26, 27, 28), NOW, started=late_start
+        )
+        self.assertEqual(
+            missed[0].slots, (utc(2026, 9, 24, 19, 30), utc(2026, 9, 25, 19, 30))
+        )
+        # Started first, recording only from the 27th: the start does.
+        early_start = {"30_19_x_x_x": utc(2026, 9, 25, 19, 30)}
+        missed = missed_lines(
+            "backup.yml", BACKUP, records(27, 28), NOW, started=early_start
+        )
+        self.assertEqual(missed[0].slots, (utc(2026, 9, 26, 19, 30),))
+
+    def test_a_chained_line_is_not_opened_by_a_start(self) -> None:
+        # No clock takes a chained workflow up, so a start under its line's
+        # segment is not one this workflow was given.
+        chained_line = (LedgeredLine(DAILY, "backup.yml"),)
+        started = {"30_19_x_x_x": utc(2026, 9, 25, 19, 30)}
+        self.assertEqual(
+            missed_lines("audit.yml", chained_line, [], NOW, started=started), []
+        )
 
     def test_a_slot_recorded_in_parts_counts(self) -> None:
         # One leg done is a delivered slot; its failed leg is a failing run.
@@ -371,6 +413,7 @@ class CheckTest(unittest.TestCase):
             {"backup.yml": document(), "other.yml": document(enrolled=False)},
             NOW,
             records=lambda _repo, _file: records(22, 23, 24, 26, 27, 28),
+            starts=no_starts,
         )
         self.assertEqual(report.checked, ("backup.yml",))
         self.assertEqual(
@@ -384,7 +427,9 @@ class CheckTest(unittest.TestCase):
         def failing(_repo: str, _file: str) -> list[str]:
             raise GitHubError("gh: Server Error (HTTP 502)")
 
-        report = check("owner/name", {"backup.yml": document()}, NOW, records=failing)
+        report = check(
+            "owner/name", {"backup.yml": document()}, NOW, failing, no_starts
+        )
         self.assertEqual(report.missed, ())
         self.assertEqual(report.checked, ())
         self.assertEqual(
@@ -406,6 +451,7 @@ class CheckTest(unittest.TestCase):
             documents,
             NOW,
             records=lambda _repo, workflow_file: record_names[workflow_file],
+            starts=no_starts,
         )
         self.assertEqual(report.checked, ("audit.yml", "backup.yml"))
         self.assertEqual(
@@ -439,8 +485,79 @@ class CheckTest(unittest.TestCase):
                 raise GitHubError("gh: Server Error (HTTP 502)")
             return records(*range(22, 29)) if workflow_file == "backup.yml" else []
 
-        report = check("owner/name", documents, NOW, records=read)
+        report = check("owner/name", documents, NOW, read, no_starts)
         self.assertEqual(report.judged, (("backup.yml", DAILY),))
+
+    def test_a_line_with_a_start_and_no_record_is_judged(self) -> None:
+        start = start_for("backup.yml", DAILY, utc(2026, 9, 26, 19, 30))
+        report = check(
+            "owner/name",
+            {"backup.yml": document()},
+            NOW,
+            records=lambda _repo, _file: [],
+            starts=lambda _repo: [start],
+        )
+        self.assertEqual(report.judged, (("backup.yml", DAILY),))
+        self.assertEqual(
+            [line.slots for line in report.missed],
+            [(utc(2026, 9, 27, 19, 30), utc(2026, 9, 28, 19, 30))],
+        )
+        self.assertEqual(report.unreadable, ())
+
+    def test_a_line_with_no_start_and_no_record_is_not_judged(self) -> None:
+        # Passed over, a line whose every delivery fails would never be named;
+        # reported, the check does not pass.
+        report = check(
+            "owner/name",
+            {"backup.yml": document()},
+            NOW,
+            records=lambda _repo, _file: [],
+            starts=no_starts,
+        )
+        self.assertEqual(report.judged, ())
+        ((workflow_file, reason),) = report.unreadable
+        self.assertEqual(workflow_file, "backup.yml")
+        self.assertIn("no record and no start", reason)
+        self.assertIn("no clock has taken it up yet", reason)
+
+    def test_a_chained_line_with_no_record_is_not_judged(self) -> None:
+        documents = {
+            "backup.yml": named("Backup", document()),
+            "audit.yml": chained(),
+        }
+        record_names = {"backup.yml": records(*range(22, 29)), "audit.yml": []}
+        report = check(
+            "owner/name",
+            documents,
+            NOW,
+            records=lambda _repo, workflow_file: record_names[workflow_file],
+            starts=no_starts,
+        )
+        ((workflow_file, reason),) = report.unreadable
+        self.assertEqual(workflow_file, "audit.yml")
+        self.assertIn("chained line", reason)
+
+    def test_starts_that_cannot_be_read_leave_recorded_lines_judged(self) -> None:
+        def failing(_repo: str) -> list[Start]:
+            raise GitHubError("gh: Server Error (HTTP 502)")
+
+        documents = {
+            "backup.yml": document(),
+            "fresh.yml": document(workflow_file="fresh.yml", cron="0 7 * * *"),
+        }
+        report = check(
+            "owner/name",
+            documents,
+            NOW,
+            records=lambda _repo, workflow_file: (
+                records(*range(22, 29)) if workflow_file == "backup.yml" else []
+            ),
+            starts=failing,
+        )
+        self.assertEqual(report.judged, (("backup.yml", DAILY),))
+        ((workflow_file, reason),) = report.unreadable
+        self.assertEqual(workflow_file, "fresh.yml")
+        self.assertIn("starts could not be read", reason)
 
     def test_an_enrolled_workflow_that_cannot_be_read_is_reported(self) -> None:
         # Enrolled with a line firing twice a day and the slot action: the
@@ -450,6 +567,7 @@ class CheckTest(unittest.TestCase):
             {"backup.yml": document(cron="0 1,13 * * *")},
             NOW,
             records=lambda _repo, _file: [],
+            starts=no_starts,
         )
         self.assertEqual(report.checked, ())
         self.assertEqual(len(report.unreadable), 1)
@@ -492,7 +610,7 @@ class MainTest(unittest.TestCase):
             return workflow_files.parse_all(files, yq.executable())
 
         with contextlib.redirect_stdout(io.StringIO()):
-            return main(["--repo", "owner/name"], NOW, records, load)
+            return main(["--repo", "owner/name"], NOW, records, load, no_starts)
 
     def test_every_slot_recorded_passes(self) -> None:
         files = {"backup.yml": enrolled_yaml("backup.yml")}
@@ -513,7 +631,9 @@ class MainTest(unittest.TestCase):
             raise GitHubError("gh: Server Error (HTTP 502)")
 
         with contextlib.redirect_stdout(io.StringIO()):
-            status = main(["--repo", "owner/name"], NOW, load=unreachable)
+            status = main(
+                ["--repo", "owner/name"], NOW, load=unreachable, starts=no_starts
+            )
         self.assertEqual(status, EXIT_INCOMPLETE)
 
     def test_a_workflow_file_that_did_not_parse_does_not_pass(self) -> None:

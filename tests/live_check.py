@@ -59,7 +59,7 @@ from github_cron_trigger import (
     workflow_files,
     yq,
 )
-from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for
+from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for, start_for
 from github_cron_trigger.cron_slots import UTC, format_slot, latest_slot, parse_cron
 from github_cron_trigger.github import gh_api
 from github_cron_trigger.workflow_triggers import utc_schedule
@@ -332,6 +332,22 @@ def clocks(repo: str, required: bool) -> None:
     _expect(
         _sends(outputs) == 1 and newest in [mark.slot for mark in _clock_marks(repo)],
         "two clocks ticking a due slot at once send it exactly once",
+    )
+    # A start sits in a directory beside the line's marks; GitHub must take
+    # both in one segment, and a mark read must not see the start.
+    start = start_for(CLOCK_CHECK, YEARLY, older.slot)
+    MARKS.create_start(repo, start)
+    try:
+        _expect(
+            start in MARKS.read_starts(repo)
+            and newest in [mark.slot for mark in _clock_marks(repo)],
+            "a start is written beside the line's marks and read back as a start",
+        )
+    finally:
+        MARKS.remove_starts(repo, [start])
+    _expect(
+        start not in MARKS.read_starts(repo),
+        "a start is removed",
     )
 
 

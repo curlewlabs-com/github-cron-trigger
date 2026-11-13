@@ -33,10 +33,15 @@ What counts, and why each bound:
   measured starting more than six and a half hours late, and a delivery then
   takes its own run time, so a slot inside GRACE may still be in flight rather
   than missed.
-- A line is checked from its oldest record on, never before it: slots from
-  before a workflow enrolled were never recorded and are not misses, and a line
-  with no record at all is not checked yet. A key that names no instant is not
-  a record the ledger wrote (ledger_key writes none), so it opens no line.
+- A line is checked from its start: the slot at which a clock first took it
+  up (clock_marks.py), or its oldest record if that is older. Slots before
+  then are not misses, since the line was not yet owed them, and a line is
+  judged from its start whether or not any delivery of it has succeeded yet. A
+  chained line has no start of its own - no clock takes a chained workflow up -
+  so it is judged from its oldest record. A line with neither is reported as
+  not judged, never passed over: one whose every delivery fails would
+  otherwise never be named. A key that names no instant is not a record the
+  ledger wrote (ledger_key writes none), so it opens no line.
 - Any record of the slot counts, a part's included. A partly done slot was
   delivered, and its failed leg is a failed run, which reports itself.
 - The window reaches back LOOKBACK at most, so a missed slot is named for that
@@ -48,8 +53,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import default_branch, slot_ledger, yq
+from . import clock_marks, default_branch, slot_ledger, yq
 from .clock import EVENT_TYPE_PREFIX, scheduled_workflow, uses_slot_action
+from .clock_marks import Start
 from .cron_slots import (
     UTC,
     CronSchedule,
@@ -107,9 +113,10 @@ class Report:
     checked: tuple[str, ...]
     unreadable: tuple[tuple[str, str], ...]
     # Every line the check judged, missed or not, as (workflow file, line): its
-    # ledger read and holding at least one of its slots. A line absent here was
-    # not judged this time - refused, gone, not yet recorded, or behind a
-    # ledger that could not be read - which says nothing about what it missed.
+    # ledger read and the line holding a start or a record to judge it from. A
+    # line absent here was not judged this time - refused, gone, with neither a
+    # start nor a record, or behind a ledger that could not be read - which
+    # says nothing about what it missed.
     judged: tuple[tuple[str, CronSchedule], ...]
 
 
@@ -262,6 +269,26 @@ def recorded_slots(
     return slots
 
 
+def line_start(recorded: set[datetime], start: datetime | None) -> datetime | None:
+    """The slot a line is judged after: the earlier of its start and its oldest
+    record, or None when it has neither. Neither is owed - a start's slot was
+    taken up without being sent, and a record's is done - so judging opens just
+    after it."""
+    candidates = [*recorded, *([start] if start is not None else [])]
+    return min(candidates) if candidates else None
+
+
+def own_start(
+    workflow_file: str, line: LedgeredLine, started: Mapping[str, datetime]
+) -> datetime | None:
+    """A line's start, from the workflow's starts by line segment. Only a line
+    the workflow is enrolled for has one; a chained line, delivered through its
+    parent, has none."""
+    if line.delivered_by != workflow_file:
+        return None
+    return started.get(cron_segment(line.schedule))
+
+
 def missed_lines(
     workflow_file: str,
     lines: Sequence[LedgeredLine],
@@ -269,20 +296,23 @@ def missed_lines(
     now: datetime,
     grace: timedelta = GRACE,
     lookback: timedelta = LOOKBACK,
+    started: Mapping[str, datetime] | None = None,
 ) -> list[MissedLine]:
     """Each of the workflow's lines with due slots the records do not hold.
 
     `record_names` are the workflow's records as slot_ledger.records returns
-    them, `<cron line>/<leaf>`.
+    them, `<cron line>/<leaf>`. `started` holds the workflow's starts by line
+    segment; only a line the workflow is itself enrolled for has one.
     """
+    own_starts = started or {}
     missed = []
     for line in lines:
         schedule = line.schedule
         recorded = recorded_slots(schedule, record_names)
-        if not recorded:
+        start = line_start(recorded, own_start(workflow_file, line, own_starts))
+        if start is None:
             continue
-        # The oldest record is itself recorded, so the window opens just after it.
-        after = max(min(recorded), now - lookback)
+        after = max(start, now - lookback)
         slots = tuple(
             slot
             for slot in slots_between(schedule, after, now - grace)
@@ -293,22 +323,53 @@ def missed_lines(
     return missed
 
 
+def starts_by_line(starts: Sequence[Start]) -> dict[str, dict[str, datetime]]:
+    """The oldest start of each line, by workflow file and then line segment."""
+    by_line: dict[str, dict[str, datetime]] = {}
+    for start in starts:
+        lines = by_line.setdefault(start.workflow_file, {})
+        if start.segment not in lines or start.slot < lines[start.segment]:
+            lines[start.segment] = start.slot
+    return by_line
+
+
+def unstarted_reason(workflow_file: str, line: LedgeredLine, why: str) -> str:
+    if line.delivered_by == workflow_file:
+        return (
+            f"line {line.schedule.canonical!r} has no record and no start, so it"
+            f" is not judged: {why}"
+        )
+    return (
+        f"chained line {line.schedule.canonical!r} (through {line.delivered_by})"
+        " has no record yet, and a chained line is judged from its first one"
+    )
+
+
 def check(
     repo: str,
     documents: Mapping[str, object],
     now: datetime,
     records: Callable[[str, str], list[str]] = slot_ledger.records,
+    starts: Callable[[str], list[Start]] = clock_marks.read_starts,
 ) -> Report:
     """Missed slots across every workflow in `documents` that records slots.
 
     A workflow's records, or a line it might record on, that cannot be read is
     reported as unreadable and not judged: saying nothing about it is the
     honest answer, where an empty record list would name every slot as missed.
+    So is a line with no start and no record. When the starts themselves
+    cannot be read, a line with records is still judged from its oldest one.
     """
     missed: list[MissedLine] = []
     checked: list[str] = []
     unreadable: list[tuple[str, str]] = []
     judged: list[tuple[str, CronSchedule]] = []
+    try:
+        started = starts_by_line(starts(repo))
+        no_start = "no clock has taken it up yet"
+    except (GitHubError, ValueError) as exc:
+        started = {}
+        no_start = f"the clock's starts could not be read: {exc}"
     for workflow_file, document in sorted(documents.items()):
         lines, problems = ledgered_lines(workflow_file, document, documents)
         unreadable.extend((workflow_file, problem) for problem in problems)
@@ -320,12 +381,20 @@ def check(
             unreadable.append((workflow_file, str(exc)))
             continue
         checked.append(workflow_file)
-        judged.extend(
-            (workflow_file, line.schedule)
-            for line in lines
-            if recorded_slots(line.schedule, record_names)
+        own_starts = started.get(workflow_file, {})
+        for line in lines:
+            start = line_start(
+                recorded_slots(line.schedule, record_names),
+                own_start(workflow_file, line, own_starts),
+            )
+            if start is None:
+                reason = unstarted_reason(workflow_file, line, no_start)
+                unreadable.append((workflow_file, reason))
+            else:
+                judged.append((workflow_file, line.schedule))
+        missed.extend(
+            missed_lines(workflow_file, lines, record_names, now, started=own_starts)
         )
-        missed.extend(missed_lines(workflow_file, lines, record_names, now))
     return Report(tuple(missed), tuple(checked), tuple(unreadable), tuple(judged))
 
 
@@ -342,6 +411,7 @@ def main(
     now: datetime | None = None,
     records: Callable[[str, str], list[str]] = slot_ledger.records,
     load: default_branch.Loader = default_branch.load,
+    starts: Callable[[str], list[Start]] = clock_marks.read_starts,
 ) -> int:
     parser = argparse.ArgumentParser(
         prog="github-cron-trigger missed",
@@ -354,7 +424,7 @@ def main(
     except (GitHubError, ValueError, yq.ParserUnavailable) as exc:
         print(f"::error::missed: cannot read any workflow of {args.repo}: {exc}")
         return EXIT_INCOMPLETE
-    report = check(args.repo, documents, now or datetime.now(UTC), records)
+    report = check(args.repo, documents, now or datetime.now(UTC), records, starts)
     for workflow_file, reason in sorted(unparsed.items()):
         print(f"::error::{workflow_file}: not read, not judged: {reason}")
     for workflow_file, reason in report.unreadable:

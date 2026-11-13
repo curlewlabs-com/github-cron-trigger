@@ -33,7 +33,15 @@ from github_cron_trigger.clock import (
     stale_marks,
     tick,
 )
-from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for
+from github_cron_trigger.clock_marks import (
+    GitHubMarks,
+    Mark,
+    Start,
+    mark_for,
+    parse_mark,
+    parse_start,
+    start_for,
+)
 from github_cron_trigger.cron_slots import (
     UTC,
     CronSchedule,
@@ -321,8 +329,8 @@ class StaleMarksTest(unittest.TestCase):
 
 
 class FakeRemote:
-    """A repository's marks, ledger and dispatches, in memory. A claim of a mark
-    that exists fails, as GitHub's ref create does."""
+    """A repository's marks, starts, ledger and dispatches, in memory. A claim
+    of a mark that exists fails, as GitHub's ref create does."""
 
     def __init__(
         self,
@@ -330,8 +338,10 @@ class FakeRemote:
         done: Iterable[datetime] = (),
         failing_dispatches: int = 0,
         failing_done_reads: int = 0,
+        starts: Iterable[Start] = (),
     ) -> None:
         self.marks = set(marks)
+        self.starts = set(starts)
         self.done = set(done)
         self.failing_dispatches = failing_dispatches
         self.failing_done_reads = failing_done_reads
@@ -370,6 +380,15 @@ class FakeRemote:
             self.failing_dispatches -= 1
             raise GitHubError("gh: Server Error (HTTP 502)")
         self.dispatched.append((workflow_file, slot))
+
+    def read_starts(self, repo: str) -> list[Start]:
+        return sorted(self.starts)
+
+    def create_start(self, repo: str, start: Start) -> None:
+        self.starts.add(start)
+
+    def remove_starts(self, repo: str, starts: Iterable[Start]) -> None:
+        self.starts.difference_update(starts)
 
 
 def run_tick(
@@ -507,6 +526,119 @@ class TickTest(unittest.TestCase):
         problems, _ = run_tick(remote, self.enrolled, utc(2026, 9, 28, 19, 31))
         self.assertEqual(len(problems), 1)
         self.assertEqual((remote.marks, remote.dispatched), (set(), []))
+
+
+RECORDING = """\
+name: Backup
+on:
+  schedule:
+    - cron: "30 19 * * *"
+  repository_dispatch:
+    types: [github-cron-trigger/backup.yml]
+jobs:
+  slot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: curlewlabs-com/github-cron-trigger/slot@v0
+"""
+
+
+class StartsTest(unittest.TestCase):
+    """A line's start is the boundary the missed-slot check judges it from, so
+    the failures here are silent ones: a recording line left without a start
+    (a line that never succeeds is then never judged), a start that moves
+    forward (the slots it skips are never judged), one written for a line that
+    records nothing (every slot would read as missed), and one kept after its
+    line stopped being taken up (taking it up again would count the gap as
+    missed)."""
+
+    def setUp(self) -> None:
+        self.recording = parsed({"backup.yml": RECORDING})
+        self.start = start_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30))
+
+    def test_a_recording_line_is_started_when_first_taken_up(self) -> None:
+        remote = FakeRemote()
+        problems, printed = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(problems, [])
+        self.assertEqual(remote.starts, {self.start})
+        self.assertIn("started at 2026-09-28T19:30Z", printed)
+
+    def test_a_line_marked_before_starts_existed_is_started_too(self) -> None:
+        # A repository a clock served before starts: its lines are marked, so
+        # they never baseline again, and still need a start.
+        remote = FakeRemote(marked(DAILY, utc(2026, 9, 27, 19, 30)))
+        problems, _ = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(problems, [])
+        self.assertEqual(remote.starts, {self.start})
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+
+    def test_a_start_stays_where_it_was_written(self) -> None:
+        remote = FakeRemote(starts=[self.start])
+        run_tick(remote, self.recording, utc(2026, 10, 3, 19, 31))
+        self.assertEqual(remote.starts, {self.start})
+
+    def test_a_line_that_records_nothing_gets_no_start(self) -> None:
+        # A reconciler: with no slot action it writes no record, and a start
+        # would make every one of its slots read as missed.
+        remote = FakeRemote()
+        run_tick(remote, parsed({"backup.yml": ENROLLED}), utc(2026, 9, 28, 19, 31))
+        self.assertEqual(remote.starts, set())
+
+    def test_a_start_goes_when_its_line_is_no_longer_taken_up(self) -> None:
+        for documents in (
+            parsed({"backup.yml": ENROLLED}),
+            parsed({"backup.yml": TRACKED}),
+            {},
+        ):
+            with self.subTest(documents=sorted(documents)):
+                remote = FakeRemote(starts=[self.start])
+                run_tick(remote, documents, utc(2026, 9, 29, 19, 31))
+                self.assertEqual(remote.starts, set())
+
+    def test_an_unreadable_workflow_keeps_its_starts(self) -> None:
+        remote = FakeRemote(starts=[self.start])
+        run_tick(remote, {}, utc(2026, 9, 29, 19, 31), unreadable=["backup.yml"])
+        self.assertEqual(remote.starts, {self.start})
+
+    def test_of_two_starts_the_oldest_is_kept(self) -> None:
+        # Two clocks that each found no start wrote one apiece.
+        later = start_for("backup.yml", LINE, utc(2026, 9, 29, 19, 30))
+        remote = FakeRemote(starts=[self.start, later])
+        run_tick(remote, self.recording, utc(2026, 9, 29, 19, 31))
+        self.assertEqual(remote.starts, {self.start})
+
+    def test_a_dry_run_writes_no_start(self) -> None:
+        remote = FakeRemote()
+        _, printed = run_tick(
+            remote, self.recording, utc(2026, 9, 28, 19, 31), send=False
+        )
+        self.assertEqual(remote.starts, set())
+        self.assertIn("would start at 2026-09-28T19:30Z (dry run)", printed)
+
+    def test_starts_that_cannot_be_read_are_a_problem_and_slots_still_go(
+        self,
+    ) -> None:
+        class Unreadable(FakeRemote):
+            def read_starts(self, repo: str) -> list[Start]:
+                raise GitHubError("gh: Server Error (HTTP 502)")
+
+        remote = Unreadable(marked(DAILY, utc(2026, 9, 27, 19, 30)))
+        problems, _ = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("cannot read the clock's starts", problems[0])
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+
+    def test_a_start_is_not_read_as_a_mark(self) -> None:
+        # A clock that predates starts lists the same namespace; it must
+        # neither deliver from a start nor delete one as an old mark.
+        name = self.start.path.split("/", 1)[1]
+        self.assertEqual(parse_start(name), self.start)
+        self.assertIsNone(parse_mark(name))
+        self.assertIsNone(
+            parse_start(
+                mark_for("backup.yml", LINE, self.start.slot).path.split("/", 1)[1]
+            )
+        )
 
 
 class ClaimTest(unittest.TestCase):
