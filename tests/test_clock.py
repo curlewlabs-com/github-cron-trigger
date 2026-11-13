@@ -49,6 +49,7 @@ from github_cron_trigger.cron_slots import (
     parse_cron,
 )
 from github_cron_trigger.default_branch import git_blob_id
+from github_cron_trigger.freshness import LedgeredLine, missed_lines, starts_by_line
 from github_cron_trigger.github import GitHubError
 from github_cron_trigger.workflow_triggers import MisconfiguredWorkflow
 
@@ -544,38 +545,127 @@ jobs:
 
 
 class StartsTest(unittest.TestCase):
-    """A line's start is the boundary the missed-slot check judges it from, so
-    the failures here are silent ones: a recording line left without a start
-    (a line that never succeeds is then never judged), a start that moves
-    forward (the slots it skips are never judged), one written for a line that
-    records nothing (every slot would read as missed), and one kept after its
-    line stopped being taken up (taking it up again would count the gap as
-    missed)."""
+    """A line's newest start is the boundary the missed-slot check judges it
+    from, so the failures here are silent ones: a slot sent before its line's
+    start (its failed delivery is never named), a recording line left without
+    a start, one written for a line that records nothing (every slot would read
+    as missed), and an old start outliving the time its line was taken up
+    (taking it up again would count the gap as missed)."""
 
     def setUp(self) -> None:
         self.recording = parsed({"backup.yml": RECORDING})
         self.start = start_for("backup.yml", LINE, utc(2026, 9, 28, 19, 30))
 
-    def test_a_recording_line_is_started_when_first_taken_up(self) -> None:
+    def test_a_line_taken_up_afresh_starts_at_its_baselined_slot(self) -> None:
         remote = FakeRemote()
         problems, printed = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
         self.assertEqual(problems, [])
+        self.assertEqual(remote.dispatched, [])
         self.assertEqual(remote.starts, {self.start})
         self.assertIn("started at 2026-09-28T19:30Z", printed)
 
-    def test_a_line_marked_before_starts_existed_is_started_too(self) -> None:
-        # A repository a clock served before starts: its lines are marked, so
-        # they never baseline again, and still need a start.
+    def test_a_slot_sent_with_no_start_yet_is_judged(self) -> None:
+        # A line a clock marked before starts existed, with no record, whose
+        # first delivery under starts fails: the start sits before the sent
+        # slot, so the check names that slot instead of passing over it.
         remote = FakeRemote(marked(DAILY, utc(2026, 9, 27, 19, 30)))
         problems, _ = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
         self.assertEqual(problems, [])
-        self.assertEqual(remote.starts, {self.start})
+        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+        (start,) = remote.starts
+        self.assertEqual(start.slot, utc(2026, 9, 27, 19, 30))
+        later = utc(2026, 9, 29, 12, 0)
+        (missed,) = missed_lines(
+            "backup.yml",
+            [LedgeredLine(LINE, "backup.yml")],
+            [],
+            later,
+            started={start.segment: start.slot},
+        )
+        self.assertEqual(missed.slots, (utc(2026, 9, 28, 19, 30),))
+
+    def test_the_start_is_written_before_the_slot_is_sent(self) -> None:
+        class Ordered(FakeRemote):
+            def __init__(self, marks: list[Mark]) -> None:
+                super().__init__(marks)
+                self.events: list[str] = []
+
+            def create_start(self, repo: str, start: Start) -> None:
+                self.events.append("start")
+                super().create_start(repo, start)
+
+            def dispatch(
+                self,
+                repo: str,
+                workflow_file: str,
+                schedule: CronSchedule,
+                slot: datetime,
+            ) -> None:
+                self.events.append("send")
+                super().dispatch(repo, workflow_file, schedule, slot)
+
+        remote = Ordered(marked(DAILY, utc(2026, 9, 27, 19, 30)))
+        run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(remote.events, ["start", "send"])
+
+    def test_a_line_whose_start_is_not_written_waits(self) -> None:
+        class Failing(FakeRemote):
+            failures = 1
+
+            def create_start(self, repo: str, start: Start) -> None:
+                if self.failures:
+                    self.failures -= 1
+                    raise GitHubError("gh: Server Error (HTTP 502)")
+                super().create_start(repo, start)
+
+        remote = Failing(marked(DAILY, utc(2026, 9, 27, 19, 30)))
+        problems, _ = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
+        self.assertEqual(remote.dispatched, [])
+        self.assertTrue(any("not sent" in problem for problem in problems))
+        # The next tick writes the start, then sends.
+        problems, _ = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 36))
+        self.assertEqual(problems, [])
         self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
 
-    def test_a_start_stays_where_it_was_written(self) -> None:
-        remote = FakeRemote(starts=[self.start])
+    def test_a_marked_line_with_nothing_due_starts_at_its_latest_slot(self) -> None:
+        remote = FakeRemote(marked(DAILY, utc(2026, 9, 28, 19, 30)))
+        run_tick(remote, self.recording, utc(2026, 9, 28, 20, 0))
+        self.assertEqual(remote.starts, {self.start})
+
+    def test_a_start_stays_while_its_line_is_served(self) -> None:
+        remote = FakeRemote(
+            marked(DAILY, utc(2026, 10, 2, 19, 30)), starts=[self.start]
+        )
         run_tick(remote, self.recording, utc(2026, 10, 3, 19, 31))
         self.assertEqual(remote.starts, {self.start})
+
+    def test_a_line_taken_up_again_starts_again(self) -> None:
+        # The line was disenrolled and its start's removal failed; enrolled
+        # again, no clock has a mark of it, so it baselines. The new start is
+        # newer, so it is the one read, whether or not the old one is removed.
+        class Stuck(FakeRemote):
+            def remove_starts(self, repo: str, starts: Iterable[Start]) -> None:
+                raise GitHubError("gh: Server Error (HTTP 502)")
+
+        remote = Stuck(starts=[self.start])
+        run_tick(remote, {}, utc(2026, 10, 1, 19, 31))
+        self.assertEqual(remote.starts, {self.start})
+        problems, _ = run_tick(remote, self.recording, utc(2026, 10, 5, 19, 31))
+        self.assertEqual(problems, [])
+        fresh = start_for("backup.yml", LINE, utc(2026, 10, 5, 19, 30))
+        self.assertEqual(remote.starts, {self.start, fresh})
+        self.assertEqual(
+            starts_by_line(sorted(remote.starts))["backup.yml"]["30_19_x_x_x"],
+            fresh.slot,
+        )
+
+    def test_of_a_lines_starts_the_newest_is_kept(self) -> None:
+        later = start_for("backup.yml", LINE, utc(2026, 9, 29, 19, 30))
+        remote = FakeRemote(
+            marked(DAILY, utc(2026, 9, 29, 19, 30)), starts=[self.start, later]
+        )
+        run_tick(remote, self.recording, utc(2026, 9, 29, 19, 31))
+        self.assertEqual(remote.starts, {later})
 
     def test_a_line_that_records_nothing_gets_no_start(self) -> None:
         # A reconciler: with no slot action it writes no record, and a start
@@ -600,13 +690,6 @@ class StartsTest(unittest.TestCase):
         run_tick(remote, {}, utc(2026, 9, 29, 19, 31), unreadable=["backup.yml"])
         self.assertEqual(remote.starts, {self.start})
 
-    def test_of_two_starts_the_oldest_is_kept(self) -> None:
-        # Two clocks that each found no start wrote one apiece.
-        later = start_for("backup.yml", LINE, utc(2026, 9, 29, 19, 30))
-        remote = FakeRemote(starts=[self.start, later])
-        run_tick(remote, self.recording, utc(2026, 9, 29, 19, 31))
-        self.assertEqual(remote.starts, {self.start})
-
     def test_a_dry_run_writes_no_start(self) -> None:
         remote = FakeRemote()
         _, printed = run_tick(
@@ -615,9 +698,8 @@ class StartsTest(unittest.TestCase):
         self.assertEqual(remote.starts, set())
         self.assertIn("would start at 2026-09-28T19:30Z (dry run)", printed)
 
-    def test_starts_that_cannot_be_read_are_a_problem_and_slots_still_go(
-        self,
-    ) -> None:
+    def test_starts_that_cannot_be_read_send_nothing(self) -> None:
+        # Unread, there is no telling which line needs a start before its send.
         class Unreadable(FakeRemote):
             def read_starts(self, repo: str) -> list[Start]:
                 raise GitHubError("gh: Server Error (HTTP 502)")
@@ -626,7 +708,7 @@ class StartsTest(unittest.TestCase):
         problems, _ = run_tick(remote, self.recording, utc(2026, 9, 28, 19, 31))
         self.assertEqual(len(problems), 1)
         self.assertIn("cannot read the clock's starts", problems[0])
-        self.assertEqual(remote.dispatched, [("backup.yml", utc(2026, 9, 28, 19, 30))])
+        self.assertEqual(remote.dispatched, [])
 
     def test_a_start_is_not_read_as_a_mark(self) -> None:
         # A clock that predates starts lists the same namespace; it must
@@ -634,11 +716,8 @@ class StartsTest(unittest.TestCase):
         name = self.start.path.split("/", 1)[1]
         self.assertEqual(parse_start(name), self.start)
         self.assertIsNone(parse_mark(name))
-        self.assertIsNone(
-            parse_start(
-                mark_for("backup.yml", LINE, self.start.slot).path.split("/", 1)[1]
-            )
-        )
+        mark = mark_for("backup.yml", LINE, self.start.slot)
+        self.assertIsNone(parse_start(mark.path.split("/", 1)[1]))
 
 
 class ClaimTest(unittest.TestCase):

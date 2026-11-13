@@ -416,19 +416,29 @@ enrolled workflow, reconcilers included, and only clocks read them. A tick keeps
 each line's two newest marks and removes the rest.
 
 Each line of an enrolled workflow that runs the slot action also gets a
-**start** when a clock first takes it up:
+**start**, written before a clock sends any slot of it:
 
 ```text
 refs/github-cron-trigger-clock/<workflow file>/<cron line>/start/<YYYYMMDDTHHMMZ>
 ```
 
-It names the line's latest slot at that tick, and every later slot is owed a
-record, so `missed` judges the line from its start whether or not any delivery
-of it has succeeded yet ("Missed slots"). Starts are never pruned with the
-marks. A start goes only when its line stops being one a clock takes up: the
-workflow is disenrolled, the line changes, or the slot action is dropped. Taking
-the line up again starts it again. A line a clock served before starts existed
-gets one on the next tick.
+It names the slot after which every slot of the line is owed a record, so
+`missed` judges the line from its start whether or not any delivery of it has
+succeeded yet ("Missed slots"):
+
+- A line a clock takes up afresh starts at the slot it baselines, which is not
+  sent.
+- A line a clock served before starts existed starts just before the next slot
+  it sends, so that slot is judged. If nothing is due, it starts at its latest
+  slot.
+- A clock that cannot write a line's start sends none of its slots until a
+  later tick writes it.
+
+Starts are never pruned with the marks. A start goes only when its line stops
+being one a clock takes up: the workflow is disenrolled, the line changes, or
+the slot action is dropped. A line taken up again starts again, and the newest
+start is the one read, so an older one that a failed removal left behind changes
+nothing.
 
 ### How it behaves
 
@@ -503,8 +513,8 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
 
 - A slot counts as due once `GRACE` (12 hours) has passed since it, so one
   still in flight is not named.
-- A line is checked from its start (when a clock first took it up; "What it
-  remembers, and where") or from its oldest record, whichever is older. Slots
+- A line is checked from its newest start ("What it remembers, and where")
+  or from its oldest record, whichever is older. Slots
   from before then are not misses. A line is judged from its start whether or
   not any delivery of it has ever succeeded, so a line whose every delivery
   fails is named.

@@ -36,14 +36,17 @@ action carries one start:
 
     refs/github-cron-trigger-clock/<workflow file>/<cron line>/start/<YYYYMMDDTHHMMZ>
 
-naming the line's latest slot when a clock first took it up. Every later slot
-is owed a record, so the missed-slot check (freshness.py) judges the line from
-its start, whether or not any delivery of it has yet succeeded. A start is never
+naming the slot after which every slot of the line is owed a record. The
+missed-slot check (freshness.py) judges the line from its newest start, whether
+or not any delivery of it has yet succeeded. A tick writes a line's start
+before it sends any slot of it, so a slot is never sent ahead of its line's
+start; clock.start_changes says which slot each start names. A start is never
 pruned with the marks; it goes when its line stops being one a clock takes up -
-the workflow disenrolled, the line changed, or the slot action dropped - so
-taking the line up again starts it again, and slots from before the slot action
-recorded anything are never counted as missed. A clock that finds two starts
-for a line, because two clocks wrote one at once, keeps the oldest.
+the workflow disenrolled, the line changed, or the slot action dropped - and a
+line taken up again, with no mark left, starts again, so slots from a time it
+was not taken up, or before the slot action recorded anything, are never
+counted as missed. The newest start is the one read, so an older one a failed
+removal left behind changes nothing.
 """
 
 import re
