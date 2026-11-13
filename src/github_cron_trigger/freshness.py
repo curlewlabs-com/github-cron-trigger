@@ -358,18 +358,21 @@ def check(
     reported as unreadable and not judged: saying nothing about it is the
     honest answer, where an empty record list would name every slot as missed.
     So is a line with no start and no record. When the starts themselves
-    cannot be read, a line with records is still judged from its oldest one.
+    cannot be read, no line a workflow is enrolled for is judged: its start may
+    reach back past its oldest record, so a check from the records alone could
+    pass a line that missed a slot between them. The misses its records do show
+    are still reported, since every one of them is real.
     """
     missed: list[MissedLine] = []
     checked: list[str] = []
     unreadable: list[tuple[str, str]] = []
     judged: list[tuple[str, CronSchedule]] = []
+    unread_starts: str | None = None
     try:
         started = starts_by_line(starts(repo))
-        no_start = "no clock has taken it up yet"
     except (GitHubError, ValueError) as exc:
         started = {}
-        no_start = f"the clock's starts could not be read: {exc}"
+        unread_starts = f"the clock's starts could not be read: {exc}"
     for workflow_file, document in sorted(documents.items()):
         lines, problems = ledgered_lines(workflow_file, document, documents)
         unreadable.extend((workflow_file, problem) for problem in problems)
@@ -383,12 +386,20 @@ def check(
         checked.append(workflow_file)
         own_starts = started.get(workflow_file, {})
         for line in lines:
+            if unread_starts is not None and line.delivered_by == workflow_file:
+                reason = (
+                    f"line {line.schedule.canonical!r} is not judged: {unread_starts}"
+                )
+                unreadable.append((workflow_file, reason))
+                continue
             start = line_start(
                 recorded_slots(line.schedule, record_names),
                 own_start(workflow_file, line, own_starts),
             )
             if start is None:
-                reason = unstarted_reason(workflow_file, line, no_start)
+                reason = unstarted_reason(
+                    workflow_file, line, "no clock has taken it up yet"
+                )
                 unreadable.append((workflow_file, reason))
             else:
                 judged.append((workflow_file, line.schedule))
