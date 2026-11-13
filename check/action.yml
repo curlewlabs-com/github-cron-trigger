@@ -1,0 +1,32 @@
+# Fail a pull request whose workflow files the clock or the slot action would
+# refuse, so a workflow that can never be delivered does not merge green and
+# then fail on every tick and every scheduled run. The README's "Checking
+# workflow files" says what it names.
+#
+# Runs the code beside it against the checkout's workflow directory, so the job
+# needs a checkout first. Needs python3 (3.10 or newer) and mikefarah's yq on
+# the runner, and no token: nothing is read from GitHub.
+
+name: "github-cron-trigger check"
+description: >-
+  Name every problem the github-cron-trigger clock or slot action would refuse
+  in the checkout's workflow files, such as a slot-action workflow whose cron
+  line fires more than once a day, and fail when there is one.
+
+inputs:
+  workflows:
+    description: "The workflow directory, relative to the working directory."
+    required: false
+    default: ".github/workflows"
+
+runs:
+  using: composite
+  steps:
+    - name: Check workflow files
+      shell: sh
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        WORKFLOWS: ${{ inputs.workflows }}
+      run: |
+        PYTHONPATH="$ACTION_PATH/../src" exec python3 -m github_cron_trigger check \
+          --workflows "$WORKFLOWS"

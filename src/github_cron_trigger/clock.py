@@ -51,6 +51,7 @@ from .cron_slots import (
     UnsupportedCron,
     format_slot,
     latest_slot,
+    split_advice,
 )
 from .github import GitHubError, check_repo, gh_api
 from .slot_ledger import cron_segment
@@ -103,6 +104,23 @@ def uses_slot_action(document: object) -> bool:
     return False
 
 
+def frequent_line_problem(
+    workflow_file: str, schedules: Sequence[CronSchedule]
+) -> str | None:
+    """Why a workflow running the slot action cannot carry these lines, naming
+    the lines to write instead, or None when each fires at most once a day."""
+    frequent = [s for s in schedules if not s.fires_at_most_daily]
+    if not frequent:
+        return None
+    reasons = "; and ".join(
+        f"{s.expression!r} fires more often: {split_advice(s)}" for s in frequent
+    )
+    return (
+        f"{workflow_file}: runs the slot action, so each cron line must fire at"
+        f" most once a day, but {reasons}"
+    )
+
+
 def scheduled_workflow(
     workflow_file: str, document: object
 ) -> ScheduledWorkflow | None:
@@ -146,12 +164,9 @@ def scheduled_workflow(
             f"{workflow_file}: enrolled as {own_type!r} but declares no cron: line"
         )
     if enrolled and uses_slot_action(document):
-        frequent = [s.expression for s in schedules if not s.fires_at_most_daily]
-        if frequent:
-            raise MisconfiguredWorkflow(
-                f"{workflow_file}: runs the slot action, so each cron line must fire"
-                f" at most once a day, but {frequent} fire more often"
-            )
+        problem = frequent_line_problem(workflow_file, schedules)
+        if problem is not None:
+            raise MisconfiguredWorkflow(problem)
     if not schedules:
         return None
     return ScheduledWorkflow(workflow_file, tuple(schedules), enrolled)

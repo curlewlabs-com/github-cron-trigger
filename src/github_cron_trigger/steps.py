@@ -19,6 +19,7 @@ from .cron_slots import (
     latest_slot,
     parse_cron,
     parse_slot,
+    split_advice,
 )
 from .github import GitHubError
 from .workflow_triggers import (
@@ -178,7 +179,8 @@ def resolve(
         if not schedule.fires_at_most_daily:
             raise SlotError(
                 f"cron {schedule_cron!r} fires more than once a day, so a late"
-                " schedule delivery cannot be attributed to the slot GitHub fired"
+                " schedule delivery cannot be attributed to the slot GitHub fired;"
+                f" {split_advice(schedule)}"
             )
         return Resolution(schedule=schedule, slot=latest_slot(schedule, now))
     if event_name == "workflow_run":

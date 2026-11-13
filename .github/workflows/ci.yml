@@ -60,6 +60,15 @@ jobs:
       - name: Unit tests
         run: python3 -m unittest discover -s tests -t . -v
 
+  check:
+    # The check action as a user's pull request runs it, against this
+    # repository's own workflows, so a broken action.yml fails here first.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Check action, as a pull request runs it
+        uses: ./check
+
   actionlint:
     runs-on: ubuntu-24.04
     steps:

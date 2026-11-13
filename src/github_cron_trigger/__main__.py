@@ -5,13 +5,14 @@ installed. Each command parses its own arguments; `<command> --help` lists them.
 import sys
 from collections.abc import Callable, Sequence
 
-from . import clock, freshness, steps
+from . import check, clock, freshness, steps
 
 COMMANDS: dict[str, tuple[Callable[[Sequence[str]], int], str]] = {
     "slot": (steps.slot_main, "resolve a run's slot and whether it is owed"),
     "done": (steps.done_main, "record a run's slot done"),
     "tick": (clock.main, "deliver every enrolled workflow's due slots once"),
     "missed": (freshness.main, "name the due slots no delivery recorded done"),
+    "check": (check.main, "name what would be refused in local workflow files"),
 }
 
 
