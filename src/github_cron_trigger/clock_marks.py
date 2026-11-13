@@ -30,23 +30,6 @@ This is not the slot ledger. The ledger records slots whose work finished,
 whichever delivery did it, and the slot action reads it; marks record slots a
 clock sent, for every enrolled workflow, reconcilers included, and only clocks
 read them.
-
-STARTS. Beside its marks, each line of an enrolled workflow that runs the slot
-action carries one start:
-
-    refs/github-cron-trigger-clock/<workflow file>/<cron line>/start/<YYYYMMDDTHHMMZ>
-
-naming the slot after which every slot of the line is owed a record. The
-missed-slot check (freshness.py) judges the line from its newest start, whether
-or not any delivery of it has yet succeeded. A tick writes a line's start
-before it sends any slot of it, so a slot is never sent ahead of its line's
-start; clock.start_changes says which slot each start names. A start is never
-pruned with the marks; it goes when its line stops being one a clock takes up -
-the workflow disenrolled, the line changed, or the slot action dropped - and a
-line taken up again, with no mark left, starts again, so slots from a time it
-was not taken up, or before the slot action recorded anything, are never
-counted as missed. The newest start is the one read, so an older one a failed
-removal left behind changes nothing.
 """
 
 import re
@@ -69,15 +52,11 @@ KEEP_PER_LINE = 2
 
 _WORKFLOW_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$")
 _SEGMENT_FIELD = r"(?:x|\d{1,2}(?:,\d{1,2})*)"
-_LINE = (
+_MARK = re.compile(
     rf"^(?P<file>[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml)"
     rf"/(?P<segment>{_SEGMENT_FIELD}(?:_{_SEGMENT_FIELD}){{4}})"
+    r"/(?P<key>\d{8}T\d{4}Z)$"
 )
-_MARK = re.compile(_LINE + r"/(?P<key>\d{8}T\d{4}Z)$")
-# A directory beside the marks, not a leaf, so a clock that predates starts
-# reads none as a mark and deletes none.
-START_DIRECTORY = "start"
-_START = re.compile(_LINE + rf"/{START_DIRECTORY}/(?P<key>\d{{8}}T\d{{4}}Z)$")
 
 
 @dataclass(frozen=True, order=True)
@@ -95,73 +74,23 @@ class Mark:
         return f"{MARK_NAMESPACE}/{self.workflow_file}/{self.segment}/{ledger_key(self.slot)}"
 
 
-@dataclass(frozen=True, order=True)
-class Start:
-    """When a clock took a line up: the line's latest slot at that tick. The
-    line owes a record for every slot after it."""
-
-    workflow_file: str
-    segment: str
-    slot: datetime
-
-    @property
-    def path(self) -> str:
-        """The ref path under `refs/`."""
-        return (
-            f"{MARK_NAMESPACE}/{self.workflow_file}/{self.segment}"
-            f"/{START_DIRECTORY}/{ledger_key(self.slot)}"
-        )
-
-
 def mark_for(workflow_file: str, schedule: CronSchedule, slot: datetime) -> Mark:
     if not _WORKFLOW_FILE.match(workflow_file):
         raise ValueError(f"workflow file {workflow_file!r} is not a workflow basename")
     return Mark(workflow_file, cron_segment(schedule), slot)
 
 
-def start_for(workflow_file: str, schedule: CronSchedule, slot: datetime) -> Start:
-    mark = mark_for(workflow_file, schedule, slot)
-    return Start(mark.workflow_file, mark.segment, mark.slot)
-
-
-def _parse(pattern: re.Pattern[str], name: str) -> tuple[str, str, datetime] | None:
-    match = pattern.match(name)
+def parse_mark(name: str) -> Mark | None:
+    """The mark a ref name under the namespace holds, or None for a name the
+    clock did not write: another form, or a key naming no instant."""
+    match = _MARK.match(name)
     if match is None:
         return None
     try:
         slot = parse_ledger_key(match.group("key"))
     except ValueError:
         return None
-    return match.group("file"), match.group("segment"), slot
-
-
-def parse_mark(name: str) -> Mark | None:
-    """The mark a ref name under the namespace holds, or None for a name the
-    clock did not write: another form, or a key naming no instant."""
-    parsed = _parse(_MARK, name)
-    return Mark(*parsed) if parsed is not None else None
-
-
-def parse_start(name: str) -> Start | None:
-    """The start a ref name under the namespace holds, or None, as parse_mark."""
-    parsed = _parse(_START, name)
-    return Start(*parsed) if parsed is not None else None
-
-
-def start_note(start: Start) -> str:
-    """The text of a start's blob, which says what the ref is to a person
-    browsing the repository's refs."""
-    return (
-        f"github-cron-trigger clock: took up {start.workflow_file} line"
-        f" {start.segment} at slot {format_slot(start.slot)}\n"
-    )
-
-
-def read_starts(repo: str) -> list[Start]:
-    """Every start the repository holds. A ref in the namespace in no form the
-    clock writes is left out, as GitHubMarks.read leaves it."""
-    starts = [parse_start(name) for name in list_refs(repo, f"{MARK_NAMESPACE}/")]
-    return sorted(start for start in starts if start is not None)
+    return Mark(match.group("file"), match.group("segment"), slot)
 
 
 def note(mark: Mark, claim_id: str) -> str:
@@ -220,14 +149,3 @@ class GitHubMarks:
     def remove(self, repo: str, marks: Iterable[Mark]) -> None:
         for mark in marks:
             delete_ref(repo, mark.path)
-
-    def read_starts(self, repo: str) -> list[Start]:
-        return read_starts(repo)
-
-    def create_start(self, repo: str, start: Start) -> None:
-        """Create the start; one that already exists is left as it is."""
-        self._create(repo, start.path, start_note(start))
-
-    def remove_starts(self, repo: str, starts: Iterable[Start]) -> None:
-        for start in starts:
-            delete_ref(repo, start.path)
