@@ -490,10 +490,13 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
   still in flight is not named.
 - A line is checked only from its oldest record on, so slots from before it
   enrolled are not misses.
-- A line with no record at all is reported as not judged, and the run does not
-  pass on it: no delivery of it has succeeded yet. That is either a line just
-  enrolled, until its first slot is done, or one whose every delivery fails,
-  which would otherwise never be named.
+- A line with no record at all, one of whose slots fell due inside the window,
+  is reported as not judged, and the run does not pass on it: no delivery of
+  it has succeeded yet. That is either a line just enrolled, until its first
+  slot is done, or one whose every delivery fails, which would otherwise never
+  be named. Once a line records, slots it missed before that first record are
+  not named. A line with no slot due in the window, such as a yearly line
+  between its slots, is not reported.
 - A record of any part of the slot counts as delivered.
 - The window reaches back `LOOKBACK` (7 days).
 

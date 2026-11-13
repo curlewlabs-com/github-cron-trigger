@@ -469,6 +469,22 @@ class CheckTest(unittest.TestCase):
         self.assertIn("no delivery of it has succeeded", reasons["fresh.yml"])
         self.assertIn("delivered through backup.yml", reasons["audit.yml"])
 
+    def test_a_never_recorded_line_with_nothing_due_is_left_out(self) -> None:
+        # A yearly line between its slots - just enrolled, or its last record
+        # pruned by a daily sibling's deliveries - owes nothing the window can
+        # see; reported, it would fail every check for most of the year.
+        yearly = document(cron="0 0 1 JAN *")
+        report = check(
+            "owner/name", {"backup.yml": yearly}, NOW, records=lambda _r, _f: []
+        )
+        self.assertEqual((report.judged, report.unreadable), ((), ()))
+        # Its slot due inside the window with still no record: reported.
+        soon_after = datetime(2027, 1, 3, 12, 0, tzinfo=UTC)
+        report = check(
+            "owner/name", {"backup.yml": yearly}, soon_after, records=lambda _r, _f: []
+        )
+        self.assertEqual(len(report.unreadable), 1)
+
     def test_an_enrolled_workflow_that_cannot_be_read_is_reported(self) -> None:
         # Enrolled with a line firing twice a day and the slot action: the
         # clock refuses it, and so does the check, by name.

@@ -35,11 +35,15 @@ What counts, and why each bound:
   than missed.
 - A line is checked from its oldest record on, never before it: slots from
   before a workflow enrolled were never recorded and are not misses. A line
-  with no record at all has nothing to be checked from, and is reported as
-  not judged rather than passed over: nothing tells one that has just enrolled
-  from one whose every delivery fails, and passed over, the second would never
-  be named. A key that names no instant is not a record the ledger wrote
-  (ledger_key writes none), so it opens no line.
+  with no record at all has nothing to be checked from. When one of its slots
+  fell due inside the window, it is reported as not judged rather than passed
+  over: nothing tells one that has just enrolled from one whose every
+  delivery fails, and passed over, the second would never be named. A line
+  with no slot due in the window - a yearly line between its slots, whose
+  last record its workflow's pruning may have removed - owes nothing the
+  window can see, and is left out, as a line with records is judged only
+  inside the window. A key that names no instant is not a record the ledger
+  wrote (ledger_key writes none), so it opens no line.
 - Any record of the slot counts, a part's included. A partly done slot was
   delivered, and its failed leg is a failed run, which reports itself.
 - The window reaches back LOOKBACK at most, so a missed slot is named for that
@@ -320,7 +324,7 @@ def check(
     A workflow's records, or a line it might record on, that cannot be read is
     reported as unreadable and not judged: saying nothing about it is the
     honest answer, where an empty record list would name every slot as missed.
-    So is a line with no record at all.
+    So is a line with no record at all and a slot due inside the window.
     """
     missed: list[MissedLine] = []
     checked: list[str] = []
@@ -340,7 +344,7 @@ def check(
         for line in lines:
             if recorded_slots(line.schedule, record_names):
                 judged.append((workflow_file, line.schedule))
-            else:
+            elif slots_between(line.schedule, now - LOOKBACK, now - GRACE):
                 unreadable.append((workflow_file, never_recorded(workflow_file, line)))
         missed.extend(missed_lines(workflow_file, lines, record_names, now))
     return Report(tuple(missed), tuple(checked), tuple(unreadable), tuple(judged))
