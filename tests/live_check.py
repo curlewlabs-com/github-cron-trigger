@@ -45,8 +45,7 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -60,7 +59,7 @@ from github_cron_trigger import (
     workflow_files,
     yq,
 )
-from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for, start_for
+from github_cron_trigger.clock_marks import GitHubMarks, Mark, mark_for
 from github_cron_trigger.cron_slots import UTC, format_slot, latest_slot, parse_cron
 from github_cron_trigger.github import gh_api
 from github_cron_trigger.workflow_triggers import utc_schedule
@@ -334,45 +333,6 @@ def clocks(repo: str, required: bool) -> None:
         _sends(outputs) == 1 and newest in [mark.slot for mark in _clock_marks(repo)],
         "two clocks ticking a due slot at once send it exactly once",
     )
-    # A start sits in a directory beside the line's marks; GitHub must take
-    # both in one segment, and a mark read must not see the start.
-    start = start_for(CLOCK_CHECK, YEARLY, older.slot)
-    marks_before = _clock_marks(repo)
-    MARKS.create_start(repo, start)
-    try:
-        _expect(
-            _eventually(lambda: start in MARKS.read_starts(repo), "the new start"),
-            "a start is written beside the line's marks and read back as a start",
-        )
-        _expect(
-            _clock_marks(repo) == marks_before,
-            "a mark read does not see the start",
-        )
-    finally:
-        MARKS.remove_starts(repo, [start])
-    _expect(
-        _eventually(lambda: start not in MARKS.read_starts(repo), "the removal"),
-        "a start is removed",
-    )
-
-
-# The ref listing has once answered without a ref created just before it
-# (a start read straight after its create came back without it, and passed
-# on a rerun). A few spaced reads ride that out; the count each took is
-# printed, so a listing that is slow rather than wrong shows as such.
-_READ_ATTEMPTS = 5
-_READ_DELAY_SECONDS = 3
-
-
-def _eventually(holds: Callable[[], bool], what: str) -> bool:
-    for attempt in range(1, _READ_ATTEMPTS + 1):
-        if holds():
-            if attempt > 1:
-                print(f"note: the listing showed {what} on read {attempt}")
-            return True
-        if attempt < _READ_ATTEMPTS:
-            time.sleep(_READ_DELAY_SECONDS)
-    return False
 
 
 def main() -> int:

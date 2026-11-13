@@ -415,31 +415,6 @@ and the slot action reads it; marks record slots a clock sent, for every
 enrolled workflow, reconcilers included, and only clocks read them. A tick keeps
 each line's two newest marks and removes the rest.
 
-Each line of an enrolled workflow that runs the slot action also gets a
-**start**, written before a clock sends any slot of it:
-
-```text
-refs/github-cron-trigger-clock/<workflow file>/<cron line>/start/<YYYYMMDDTHHMMZ>
-```
-
-It names the slot after which every slot of the line is owed a record, so
-`missed` judges the line from its start whether or not any delivery of it has
-succeeded yet ("Missed slots"):
-
-- A line a clock takes up afresh starts at the slot it baselines, which is not
-  sent.
-- A line a clock served before starts existed starts just before the next slot
-  it sends, so that slot is judged. If nothing is due, it starts at its latest
-  slot.
-- A clock that cannot write a line's start sends none of its slots until a
-  later tick writes it.
-
-Starts are never pruned with the marks. A start goes only when its line stops
-being one a clock takes up: the workflow is disenrolled, the line changes, or
-the slot action is dropped. A line taken up again starts again, and the newest
-start is the one read, so an older one that a failed removal left behind changes
-nothing.
-
 ### How it behaves
 
 - **Baselines.** A line no clock has marked is baselined - its latest slot is
@@ -513,16 +488,12 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
 
 - A slot counts as due once `GRACE` (12 hours) has passed since it, so one
   still in flight is not named.
-- A line is checked from its newest start ("What it remembers, and where")
-  or from its oldest record, whichever is older. Slots
-  from before then are not misses. A line is judged from its start whether or
-  not any delivery of it has ever succeeded, so a line whose every delivery
-  fails is named.
-- A chained line has no start, since no clock takes a chained workflow up, so
-  it is checked from its oldest record.
-- A line with neither a start nor a record is reported as not judged, and the
-  run does not pass on it. That is a line no clock has served yet, or a chained
-  line whose workflow has never recorded.
+- A line is checked only from its oldest record on, so slots from before it
+  enrolled are not misses.
+- A line with no record at all is reported as not judged, and the run does not
+  pass on it: no delivery of it has succeeded yet. That is either a line just
+  enrolled, until its first slot is done, or one whose every delivery fails,
+  which would otherwise never be named.
 - A record of any part of the slot counts as delivered.
 - The window reaches back `LOOKBACK` (7 days).
 
@@ -530,10 +501,6 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
 
 A workflow whose records, schedule or parent's line cannot be read is reported
 as not judged, never as missing every slot, and the run does not pass on it.
-So is every line a workflow is enrolled for when the clock's starts cannot be
-read: a start can reach back past the oldest record, so the records alone could
-pass a line that missed a slot. The misses its records do show are still
-named.
 The exit status is a bit set, so neither finding hides the other: 1 when a due
 slot has no record, 2 when anything could not be read, 0 when everything was
 read and no slot was missed. Run it daily, from the clock's host or from a
