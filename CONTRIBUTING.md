@@ -46,6 +46,8 @@ refs; it cleans up everything it writes.
   the host's yq, and nothing downloads it.
 - **Pin dependencies exactly.** Action references and the tools in
   `requirements-dev.txt` are exact versions, so a resolver cannot move them.
+  Renovate proposes their updates; a pin written inline in a workflow needs a
+  `# renovate:` comment above it saying what the literal is.
 - **Comments explain why, not what.**
 - **Keep tracked text ASCII.** Use plain hyphens and words instead of Unicode
   punctuation or decorative symbols.

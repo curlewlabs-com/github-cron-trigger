@@ -74,9 +74,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Run actionlint
-        # The installer script is pinned to the commit of actionlint's v1.7.12
-        # tag rather than its main branch, and fetches that version's binary.
+        # The installer script is pinned to a commit rather than its main
+        # branch, and fetches the release named after it. Renovate moves the
+        # release; the script's commit moves by hand, and need not match.
         run: |
+          # renovate: datasource=github-releases depName=rhysd/actionlint extractVersion=^v(?<version>.+)$
           bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) 1.7.12
           ./actionlint -color
 
