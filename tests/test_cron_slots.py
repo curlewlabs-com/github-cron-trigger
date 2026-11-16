@@ -294,7 +294,7 @@ class LatestSlotTest(unittest.TestCase):
         # from it would silently assume one.
         with self.assertRaises(ValueError):
             # The naive value is the input under test.
-            naive = datetime(2026, 9, 28, 1, 0)  # noqa: DTZ001
+            naive = utc(2026, 9, 28, 1, 0).replace(tzinfo=None)
             latest_slot(parse_cron("0 1 * * *"), naive)
 
 
@@ -459,7 +459,7 @@ class SlotsBetweenTest(unittest.TestCase):
     def test_the_window_bounds_must_be_aware(self) -> None:
         with self.assertRaises(ValueError):
             # The naive value is the input under test.
-            naive = datetime(2026, 9, 28, 1, 0)  # noqa: DTZ001
+            naive = utc(2026, 9, 28, 1, 0).replace(tzinfo=None)
             slots_between(parse_cron("0 1 * * *"), naive, utc(2026, 9, 29, 0, 0))
 
 
