@@ -253,7 +253,7 @@ def prune(repo: str, workflow_file: str, before: datetime) -> list[str]:
     form is left alone: this only removes what the ledger itself wrote.
     """
     cutoff = ledger_key(before)
-    removed = []
+    removed: list[str] = []
     for record_name in records(repo, workflow_file):
         key = record_slot_key(record_name)
         # The key format sorts lexically in time order, so string comparison is

@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from . import workflow_files, yq
+from .decoded import as_dict, as_list
 from .github import GitHubError, check_repo, gh_api
 
 # Bumped whenever the parse rules in workflow_files.parse change, or the yq
@@ -84,9 +85,10 @@ def graphql(query: str, variables: Mapping[str, str]) -> Any:
     for name, value in variables.items():
         arguments += ["-f", f"{name}={value}"]
     answer = json.loads(gh_api(arguments))
-    if not isinstance(answer, dict) or not isinstance(answer.get("data"), dict):
+    fields = as_dict(answer)
+    if fields is None or not isinstance(fields.get("data"), dict):
         raise GitHubError(f"GraphQL answered without data: {answer!r}"[:500])
-    return answer["data"]
+    return fields["data"]
 
 
 def git_blob_id(data: bytes) -> str:
@@ -144,9 +146,10 @@ class Cache:
         data = self._read(self._path("trees", tree))
         try:
             listed = json.loads(data) if data is not None else None
-            if not isinstance(listed, list):
+            decoded = as_list(listed)
+            if decoded is None:
                 return None
-            entries = [Entry(str(name), str(oid)) for name, oid in listed]
+            entries = [Entry(str(name), str(oid)) for name, oid in decoded]
         except (ValueError, TypeError):
             return None
         if not all(_OID.match(entry.oid) for entry in entries):
@@ -179,12 +182,13 @@ class Cache:
             stored = json.loads(data) if data is not None else None
         except ValueError:
             return None
-        if not isinstance(stored, dict):
+        fields = as_dict(stored)
+        if fields is None:
             return None
-        if "error" in stored and isinstance(stored["error"], str):
-            return None, stored["error"]
-        if "document" in stored:
-            return stored["document"], None
+        if "error" in fields and isinstance(fields["error"], str):
+            return None, fields["error"]
+        if "document" in fields:
+            return fields["document"], None
         return None
 
     def put_parsed(self, oid: str, document: object, error: str | None) -> None:
@@ -246,14 +250,16 @@ def _fetch_texts(
         )
         node = call(query, {"owner": owner, "name": name})["repository"]
         for index, oid in enumerate(batch):
-            blob = node.get(f"b{index}")
-            complete = (
-                isinstance(blob, dict)
+            blob = as_dict(node.get(f"b{index}"))
+            if (
+                blob is not None
                 and isinstance(blob.get("text"), str)
                 and not blob.get("isBinary")
                 and not blob.get("isTruncated")
-            )
-            texts[oid] = blob["text"] if complete else None
+            ):
+                texts[oid] = blob["text"]
+            else:
+                texts[oid] = None
     return texts
 
 

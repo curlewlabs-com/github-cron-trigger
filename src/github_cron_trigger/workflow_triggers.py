@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .cron_slots import CronSchedule, UnsupportedCron, parse_cron
+from .decoded import as_list, as_mapping, as_str_list
 
 
 class MisconfiguredWorkflow(ValueError):
@@ -20,26 +21,31 @@ class MisconfiguredWorkflow(ValueError):
 
 def triggers(document: object) -> Mapping[object, object]:
     """The `on:` block as a mapping, whichever of its forms the file uses."""
-    if not isinstance(document, Mapping):
+    fields = as_mapping(document)
+    if fields is None:
         return {}
-    on = document.get("on")
+    on = fields.get("on")
     if isinstance(on, str):
         return {on: None}
-    if isinstance(on, list):
-        return {entry: None for entry in on}
-    if isinstance(on, Mapping):
-        return on
+    entries = as_list(on)
+    if entries is not None:
+        return {entry: None for entry in entries}
+    block = as_mapping(on)
+    if block is not None:
+        return block
     return {}
 
 
 def dispatch_types(workflow_file: str, value: object) -> list[str]:
-    if not isinstance(value, Mapping) or "types" not in value:
+    fields = as_mapping(value)
+    if fields is None or "types" not in fields:
         return []
-    types = value["types"]
+    types = fields["types"]
     if isinstance(types, str):
         return [types]
-    if isinstance(types, list) and all(isinstance(t, str) for t in types):
-        return list(types)
+    strings = as_str_list(types)
+    if strings is not None:
+        return strings
     raise MisconfiguredWorkflow(
         f"{workflow_file}: repository_dispatch types is not a string list"
     )
@@ -57,16 +63,18 @@ class ScheduleEntry:
 def schedule_entries(workflow_file: str, entries: object) -> list[ScheduleEntry]:
     if entries is None:
         return []
-    if not isinstance(entries, list):
+    listed = as_list(entries)
+    if listed is None:
         raise MisconfiguredWorkflow(f"{workflow_file}: schedule is not a list")
     result: list[ScheduleEntry] = []
-    for entry in entries:
-        cron = entry.get("cron") if isinstance(entry, Mapping) else None
-        if not isinstance(cron, str):
+    for entry in listed:
+        fields = as_mapping(entry)
+        cron = fields.get("cron") if fields is not None else None
+        if fields is None or not isinstance(cron, str):
             raise MisconfiguredWorkflow(
                 f"{workflow_file}: a schedule entry has no cron string"
             )
-        timezone = entry.get("timezone")
+        timezone = fields.get("timezone")
         if timezone is not None and not isinstance(timezone, str):
             raise MisconfiguredWorkflow(
                 f"{workflow_file}: schedule entry {cron!r} has a timezone that is not"
