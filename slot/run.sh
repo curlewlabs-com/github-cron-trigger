@@ -3,7 +3,7 @@
 # event that started it. Inputs and event fields arrive in the environment from
 # action.yml, so the shell quotes them.
 set -eu
-PYTHONPATH="$GITHUB_ACTION_PATH/../src" exec python3 -m github_cron_trigger slot \
+exec "$GITHUB_ACTION_PATH/../lib/run-package.sh" slot \
 	--repo "$GITHUB_REPOSITORY" \
 	--workflow-ref "$GITHUB_WORKFLOW_REF" \
 	--workflow-sha "$GITHUB_WORKFLOW_SHA" \
