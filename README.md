@@ -364,11 +364,16 @@ It names, for each file in `.github/workflows` (or the directory the
   cannot attribute.
 
 It reads nothing from GitHub and needs no token. The same check runs outside
-Actions, from a checkout's root:
+Actions, from a checkout's root, with the package installed (see "Hosting
+it"):
 
 ```sh
-python3 -m github_cron_trigger check
+github-cron-trigger check
 ```
+
+The installed command, unlike `python3 -m`, does not put the checkout on its
+import path, so a file there named like one of the package's modules is not
+imported in its place.
 
 ## The clock
 

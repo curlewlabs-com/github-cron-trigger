@@ -3,5 +3,5 @@
 # the workflow files named. Inputs arrive in the environment from action.yml,
 # so the shell quotes them.
 set -eu
-PYTHONPATH="$GITHUB_ACTION_PATH/../src" exec python3 -m github_cron_trigger check \
+exec "$GITHUB_ACTION_PATH/../lib/run-package.sh" check \
 	--workflows "$WORKFLOWS"

@@ -62,14 +62,40 @@ jobs:
 
   check:
     # The check action as a user's pull request runs it, against this
-    # repository's own workflows, so a broken action.yml fails here first.
+    # repository's own workflows, so a broken action.yml fails here first; and
+    # on a problem it must report. On the runner image's python3 and on the
+    # oldest the package supports, since the launcher every action shares
+    # (lib/run-package.sh) must start on both.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["", "3.10"]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - if: matrix.python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
       - name: Check action, as a pull request runs it
         uses: ./check
+      - name: Add a problem, and a module named like the package
+        # The action runs in the consumer's checkout, which can hold a file
+        # named like the package; were it imported in the package's place, the
+        # check would pass.
+        run: |
+          printf 'name: Hourly\non:\n  schedule:\n    - cron: "17 * * * *"\n  repository_dispatch:\n    types: [github-cron-trigger/hourly.yml]\njobs:\n  work:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: curlewlabs-com/github-cron-trigger/slot@v0\n' > .github/workflows/hourly.yml
+          printf 'pass\n' > github_cron_trigger.py
+      - name: The check action reports the problem
+        id: judged
+        continue-on-error: true
+        uses: ./check
+      - name: Require that it failed
+        env:
+          OUTCOME: ${{ steps.judged.outcome }}
+        run: test "$OUTCOME" = failure
 
   live:
     # Writes and deletes git refs, so it needs a token that can; a pull
