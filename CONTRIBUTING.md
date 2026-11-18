@@ -44,6 +44,9 @@ refs; it cleans up everything it writes.
   write to the user's repository, so the code they run stays small and has no
   dependencies to install. Beyond `python3` and `gh`, the one tool it runs is
   the host's yq, and nothing downloads it.
+- **Each action's step calls a script.** Its `run:` in `action.yml` is one call
+  of the `run.sh` beside it, with inputs passed through `env:`, so shellcheck
+  reads all of the shell the action runs.
 - **Pin dependencies exactly.** Action references and the tools in
   `requirements-dev.txt` are exact versions, so a resolver cannot move them.
   Renovate proposes their updates; a pin written inline in a workflow needs a
