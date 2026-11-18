@@ -288,8 +288,7 @@ jobs in "Enrolling a workflow":
 
 ```yaml
 concurrency:
-  group:
-    ${{ github.event_name == 'pull_request' && format('backup-pr-{0}',
+  group: ${{ github.event_name == 'pull_request' && format('backup-pr-{0}',
     github.run_id) || 'backup' }}
   queue: max
   cancel-in-progress: false
@@ -602,7 +601,7 @@ still.
 
 ```sh
 python3 -m unittest discover -s tests -t .   # the unit tests
-ruff format --check . && ruff check . && mypy
+mypy
 ```
 
 `CONTRIBUTING.md` has the conventions. The live check against GitHub's API
