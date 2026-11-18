@@ -53,6 +53,7 @@ from .cron_slots import (
     latest_slot,
     split_advice,
 )
+from .decoded import as_list, as_mapping
 from .github import GitHubError, check_repo, gh_api
 from .slot_ledger import cron_segment
 from .workflow_triggers import (
@@ -87,15 +88,18 @@ def uses_slot_action(document: object) -> bool:
     reusable workflow or another action is not seen, which leaves that
     workflow's once-a-day rule to the slot step's own refusal at run time.
     """
-    jobs = document.get("jobs") if isinstance(document, Mapping) else None
-    if not isinstance(jobs, Mapping):
+    fields = as_mapping(document)
+    jobs = as_mapping(fields.get("jobs")) if fields is not None else None
+    if jobs is None:
         return False
     for job in jobs.values():
-        steps = job.get("steps") if isinstance(job, Mapping) else None
-        if not isinstance(steps, list):
+        job_fields = as_mapping(job)
+        steps = as_list(job_fields.get("steps")) if job_fields is not None else None
+        if steps is None:
             continue
         for step in steps:
-            uses = step.get("uses") if isinstance(step, Mapping) else None
+            step_fields = as_mapping(step)
+            uses = step_fields.get("uses") if step_fields is not None else None
             if not isinstance(uses, str):
                 continue
             action = uses.split("@", 1)[0].rstrip("/")

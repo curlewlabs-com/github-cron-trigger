@@ -65,6 +65,7 @@ from .cron_slots import (
     parse_ledger_key,
     slots_between,
 )
+from .decoded import as_mapping, as_str_list
 from .github import GitHubError
 from .slot_ledger import cron_segment, record_slot_key
 from .workflow_triggers import (
@@ -170,12 +171,9 @@ def chained_lines(
     if "workflow_run" not in on:
         return [], []
     run = on.get("workflow_run")
-    names = run.get("workflows") if isinstance(run, Mapping) else None
-    if (
-        not isinstance(names, list)
-        or not names
-        or not all(isinstance(name, str) for name in names)
-    ):
+    run_fields = as_mapping(run)
+    names = as_str_list(run_fields.get("workflows")) if run_fields is not None else None
+    if not names:
         unnamed = (
             f"{workflow_file}: chains through workflow_run without naming its"
             " parent workflows"
@@ -187,7 +185,8 @@ def chained_lines(
         parents = sorted(
             parent_file
             for parent_file, parent in documents.items()
-            if isinstance(parent, Mapping) and display_name(parent_file, parent) == name
+            if (parent_fields := as_mapping(parent)) is not None
+            and display_name(parent_file, parent_fields) == name
         )
         if not parents:
             problems.append(
@@ -282,7 +281,7 @@ def missed_lines(
     `record_names` are the workflow's records as slot_ledger.records returns
     them, `<cron line>/<leaf>`.
     """
-    missed = []
+    missed: list[MissedLine] = []
     for line in lines:
         schedule = line.schedule
         recorded = recorded_slots(schedule, record_names)

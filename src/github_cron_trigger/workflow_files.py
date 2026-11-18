@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from . import yq
+from .decoded import as_dict, as_list
 from .github import check_repo, gh_api
 
 WORKFLOW_SUFFIXES = (".yml", ".yaml")
@@ -86,11 +87,12 @@ def parse(text: str, executable: str) -> Mapping[str, object]:
         raise UnreadableWorkflow(
             f"yq answered something other than JSON: {exc}"
         ) from exc
-    if not isinstance(documents, list) or len(documents) != 1:
-        count = len(documents) if isinstance(documents, list) else "no"
+    listed = as_list(documents)
+    if listed is None or len(listed) != 1:
+        count = len(listed) if listed is not None else "no"
         raise UnreadableWorkflow(f"holds {count} YAML documents, not one")
-    document = documents[0]
-    if not isinstance(document, dict):
+    document = as_dict(listed[0])
+    if document is None:
         raise UnreadableWorkflow("its top level is not a mapping")
     return document
 

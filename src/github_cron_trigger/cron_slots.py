@@ -326,7 +326,7 @@ def slots_between(
     """
     start = _require_aware(after)
     end = _require_aware(until)
-    slots = []
+    slots: list[datetime] = []
     day = start.date()
     while day <= end.date():
         if schedule.fires_on(day):
