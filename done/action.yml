@@ -37,15 +37,7 @@ runs:
       shell: sh
       env:
         GH_TOKEN: ${{ inputs.github-token }}
-        ACTION_PATH: ${{ github.action_path }}
         SLOT: ${{ inputs.slot }}
         CRON: ${{ inputs.cron }}
         PART: ${{ inputs.part }}
-      run: |
-        PYTHONPATH="$ACTION_PATH/../src" exec python3 -m github_cron_trigger "done" \
-          --repo "$GITHUB_REPOSITORY" \
-          --workflow-ref "$GITHUB_WORKFLOW_REF" \
-          --slot "$SLOT" \
-          --cron "$CRON" \
-          --part "$PART" \
-          --sha "$GITHUB_SHA"
+      run: '"$GITHUB_ACTION_PATH/run.sh"'

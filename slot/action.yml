@@ -55,7 +55,6 @@ runs:
       shell: sh
       env:
         GH_TOKEN: ${{ inputs.github-token }}
-        ACTION_PATH: ${{ github.action_path }}
         EVENT_NAME: ${{ github.event_name }}
         PAYLOAD_SLOT: ${{ github.event.client_payload.slot }}
         PAYLOAD_CRON: ${{ github.event.client_payload.cron }}
@@ -65,19 +64,4 @@ runs:
         PARENT_EVENT: ${{ github.event.workflow_run.event }}
         PARENT_CREATED_AT: ${{ github.event.workflow_run.created_at }}
         PART: ${{ inputs.part }}
-      run: |
-        PYTHONPATH="$ACTION_PATH/../src" exec python3 -m github_cron_trigger slot \
-          --repo "$GITHUB_REPOSITORY" \
-          --workflow-ref "$GITHUB_WORKFLOW_REF" \
-          --workflow-sha "$GITHUB_WORKFLOW_SHA" \
-          --event-name "$EVENT_NAME" \
-          --payload-slot "$PAYLOAD_SLOT" \
-          --payload-cron "$PAYLOAD_CRON" \
-          --schedule-cron "$SCHEDULE_CRON" \
-          --parent-path "$PARENT_PATH" \
-          --parent-sha "$PARENT_SHA" \
-          --parent-event "$PARENT_EVENT" \
-          --parent-created-at "$PARENT_CREATED_AT" \
-          --part "$PART" \
-          --github-output "$GITHUB_OUTPUT" \
-          --step-summary "$GITHUB_STEP_SUMMARY"
+      run: '"$GITHUB_ACTION_PATH/run.sh"'
