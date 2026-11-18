@@ -73,8 +73,10 @@ jobs:
 
   live:
     # Writes and deletes git refs, so it needs a token that can; a pull
-    # request from a fork gets a read-only one and skips this job.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # request from a fork gets a read-only one and skips every step, each on
+    # the same condition. The condition sits on the steps rather than the job
+    # so the job still ends in success there, and conclusion can require
+    # success from it everywhere.
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -91,15 +93,18 @@ jobs:
     # path takes seconds.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Slot action, as an enrolled workflow runs it
         id: slot
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: ./slot
 
       - name: Only this workflow's schedule run is a scheduled delivery
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           EVENT_NAME: ${{ github.event_name }}
           SCHEDULED: ${{ steps.slot.outputs.scheduled }}
@@ -115,6 +120,7 @@ jobs:
           echo "ok: a $EVENT_NAME run is scheduled=$SCHEDULED slot=$SLOT and proceeds"
 
       - name: Live check against the GitHub API
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
           RECORD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -157,10 +163,7 @@ jobs:
           CHECK: ${{ needs.check.result }}
           LIVE: ${{ needs.live.result }}
           BASELINE: ${{ needs.baseline.result }}
-        # live's own `if` is the only thing that skips it, and it skips only a
-        # pull request from a fork, whose token cannot write refs, so a skip
-        # passes; any other result but success fails.
         run: |
           test "$LINT" = success && test "$TEST" = success &&
-            test "$CHECK" = success && test "$BASELINE" = success &&
-            { test "$LIVE" = success || test "$LIVE" = skipped; }
+            test "$CHECK" = success && test "$LIVE" = success &&
+            test "$BASELINE" = success
