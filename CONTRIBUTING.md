@@ -58,10 +58,11 @@ refs; it cleans up everything it writes.
 ## Compatibility
 
 The dispatch event type and payload keys, the ledger's ref layout, the actions'
-inputs and outputs, and the command-line interface are the contract. A clock
-and the actions in a repository are upgraded separately, and a ledger outlives
-any one release, so from 1.0.0 on a change to any of them is a major version.
-Before 1.0.0 it is a minor version, and its release notes say how to move.
+inputs and outputs, the command-line interface, and the names the package root
+exports are the contract. A clock and the actions in a repository are upgraded
+separately, and a ledger outlives any one release, so from 1.0.0 on a change to
+any of them is a major version. Before 1.0.0 it is a minor version, and its
+release notes say how to move.
 
 ## Submitting
 

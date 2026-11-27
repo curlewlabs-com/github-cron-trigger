@@ -17,18 +17,18 @@ from datetime import datetime, timedelta, timezone
 
 from github_cron_trigger import workflow_files, yq
 from github_cron_trigger.cron_slots import UTC, parse_cron
-from github_cron_trigger.freshness import (
+from github_cron_trigger.github import GitHubError
+from github_cron_trigger.missed import (
     EXIT_INCOMPLETE,
     EXIT_MISSED,
     GRACE,
     LOOKBACK,
     LedgeredLine,
-    check,
     ledgered_lines,
     main,
     missed_lines,
+    missed_slots,
 )
-from github_cron_trigger.github import GitHubError
 
 SLOT_ACTION = "curlewlabs-com/github-cron-trigger/slot@v1"
 
@@ -95,7 +95,7 @@ class MissedLinesTest(unittest.TestCase):
         )
 
     def test_a_line_that_never_recorded_names_no_slot(self) -> None:
-        # With no record there is no slot to check from; check() reports the
+        # With no record there is no slot to check from; missed_slots() reports the
         # line as not judged instead.
         self.assertEqual(missed_lines("backup.yml", BACKUP, [], NOW), [])
 
@@ -364,9 +364,9 @@ class LedgeredLinesTest(unittest.TestCase):
                 self.assertEqual(len(problems), 1)
 
 
-class CheckTest(unittest.TestCase):
+class MissedSlotsTest(unittest.TestCase):
     def test_a_missed_slot_is_reported_across_workflows(self) -> None:
-        report = check(
+        report = missed_slots(
             "owner/name",
             {"backup.yml": document(), "other.yml": document(enrolled=False)},
             NOW,
@@ -384,7 +384,9 @@ class CheckTest(unittest.TestCase):
         def failing(_repo: str, _file: str) -> list[str]:
             raise GitHubError("gh: Server Error (HTTP 502)")
 
-        report = check("owner/name", {"backup.yml": document()}, NOW, records=failing)
+        report = missed_slots(
+            "owner/name", {"backup.yml": document()}, NOW, records=failing
+        )
         self.assertEqual(report.missed, ())
         self.assertEqual(report.checked, ())
         self.assertEqual(
@@ -401,7 +403,7 @@ class CheckTest(unittest.TestCase):
             # The audit's legs record parts; the 25th has none.
             "audit.yml": records(22, 23, 24, 26, 27, 28, part="production"),
         }
-        report = check(
+        report = missed_slots(
             "owner/name",
             documents,
             NOW,
@@ -439,7 +441,7 @@ class CheckTest(unittest.TestCase):
                 raise GitHubError("gh: Server Error (HTTP 502)")
             return records(*range(22, 29)) if workflow_file == "backup.yml" else []
 
-        report = check("owner/name", documents, NOW, records=read)
+        report = missed_slots("owner/name", documents, NOW, records=read)
         self.assertEqual(report.judged, (("backup.yml", DAILY),))
 
     def test_a_line_that_never_recorded_is_reported_not_judged(self) -> None:
@@ -457,7 +459,7 @@ class CheckTest(unittest.TestCase):
             "audit.yml": [],
             "fresh.yml": [],
         }
-        report = check(
+        report = missed_slots(
             "owner/name",
             documents,
             NOW,
@@ -474,13 +476,13 @@ class CheckTest(unittest.TestCase):
         # pruned by a daily sibling's deliveries - owes nothing the window can
         # see; reported, it would fail every check for most of the year.
         yearly = document(cron="0 0 1 JAN *")
-        report = check(
+        report = missed_slots(
             "owner/name", {"backup.yml": yearly}, NOW, records=lambda _r, _f: []
         )
         self.assertEqual((report.judged, report.unreadable), ((), ()))
         # Its slot due inside the window with still no record: reported.
         soon_after = datetime(2027, 1, 3, 12, 0, tzinfo=UTC)
-        report = check(
+        report = missed_slots(
             "owner/name", {"backup.yml": yearly}, soon_after, records=lambda _r, _f: []
         )
         self.assertEqual(len(report.unreadable), 1)
@@ -488,7 +490,7 @@ class CheckTest(unittest.TestCase):
     def test_an_enrolled_workflow_that_cannot_be_read_is_reported(self) -> None:
         # Enrolled with a line firing twice a day and the slot action: the
         # clock refuses it, and so does the check, by name.
-        report = check(
+        report = missed_slots(
             "owner/name",
             {"backup.yml": document(cron="0 1,13 * * *")},
             NOW,
