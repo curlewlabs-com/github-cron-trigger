@@ -15,7 +15,7 @@ disk, through the same parser and the same rules, and names each problem:
   fails each such delivery (steps.resolve);
 - in a workflow that runs the slot action and chains through `workflow_run`,
   a parent whose line the slot action cannot attribute
-  (freshness.chained_lines).
+  (missed.chained_lines).
 
 It reads nothing from GitHub, so a pull request's checks can run it with no
 token.
@@ -28,7 +28,7 @@ from pathlib import Path
 from . import workflow_files, yq
 from .clock import frequent_line_problem, scheduled_workflow, uses_slot_action
 from .cron_slots import CronSchedule, UnsupportedCron
-from .freshness import chained_lines
+from .missed import chained_lines
 from .workflow_triggers import (
     MisconfiguredWorkflow,
     schedule_entries,

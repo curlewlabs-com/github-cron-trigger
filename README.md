@@ -504,7 +504,7 @@ for and, when it chains through `workflow_run`, on each enrolled parent's line.
 - A record of any part of the slot counts as delivered.
 - The window reaches back `LOOKBACK` (7 days).
 
-`freshness.py`'s header says why each bound is where it is.
+`missed.py`'s header says why each bound is where it is.
 
 A workflow whose records, schedule or parent's line cannot be read is reported
 as not judged, never as missing every slot, and the run does not pass on it.
@@ -595,7 +595,11 @@ These are the project's contract:
 - the dispatch event type and payload keys;
 - the ledger's ref layout;
 - the actions' inputs and outputs;
-- the command-line interface.
+- the command-line interface;
+- the Python names the package root exports (its `__all__`), for a caller that
+  reads the schedule, the ledger or the missed slots in-process. Import them
+  from `github_cron_trigger` itself; the modules behind it are not the
+  contract.
 
 From 1.0.0 on, they stay compatible within a major version, so a clock and the
 actions can be upgraded separately. Before 1.0.0, a minor release may change

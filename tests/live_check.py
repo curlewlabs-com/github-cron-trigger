@@ -53,7 +53,7 @@ from typing import Any
 from github_cron_trigger import (
     clock,
     default_branch,
-    freshness,
+    missed,
     slot_ledger,
     steps,
     workflow_files,
@@ -224,9 +224,9 @@ def readers(repo: str, workflow_ref: str, workflow_sha: str) -> None:
         second == first and len(calls) == 1 and not parses,
         f"an idle read of {len(first[0])} workflow file(s) is one query and no parse",
     )
-    status = freshness.main(["--repo", repo])
+    status = missed.main(["--repo", repo])
     _expect(
-        status & freshness.EXIT_INCOMPLETE == 0,
+        status & missed.EXIT_INCOMPLETE == 0,
         "the missed-slot check reads everything",
     )
 

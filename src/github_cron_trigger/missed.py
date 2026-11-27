@@ -17,7 +17,7 @@ What counts, and why each bound:
   chained records are keyed by (the README's "Chained workflows"). A line
   nothing enrolled delivers is left out even though GitHub's `schedule`
   delivery of it records: GitHub alone delivers that line, as it does every
-  workflow that is not enrolled, and this check answers for the deliveries
+  workflow that is not enrolled, and this report answers for the deliveries
   github-cron-trigger arranges, so every line it checks is delivered by an
   enrolled workflow.
 - A chained line follows the slot action (steps.resolve), which
@@ -106,7 +106,7 @@ class MissedLine:
 
 @dataclass(frozen=True)
 class Report:
-    """What a check found: the missed lines, the workflows whose records were
+    """What missed_slots found: the missed lines, the workflows whose records were
     read, and what it could not judge, by workflow, each with its reason. A
     workflow judged on some lines but not all appears in `checked` and in
     `unreadable`."""
@@ -114,7 +114,7 @@ class Report:
     missed: tuple[MissedLine, ...]
     checked: tuple[str, ...]
     unreadable: tuple[tuple[str, str], ...]
-    # Every line the check judged, missed or not, as (workflow file, line): its
+    # Every line missed_slots judged, missed or not, as (workflow file, line): its
     # ledger read and holding at least one of its slots. A line absent here was
     # not judged this time - refused, gone, not yet recorded, or behind a
     # ledger that could not be read - which says nothing about what it missed.
@@ -312,7 +312,7 @@ def never_recorded(workflow_file: str, line: LedgeredLine) -> str:
     )
 
 
-def check(
+def missed_slots(
     repo: str,
     documents: Mapping[str, object],
     now: datetime,
@@ -352,7 +352,7 @@ def check(
 # The command's exit status is a bit set, so neither finding hides the other.
 EXIT_MISSED = 1
 # Set when anything could not be read or judged - a workflow file, a line, a
-# ledger - since a check that did not reach everything cannot say nothing was
+# ledger - since a report that did not reach everything cannot say nothing was
 # missed.
 EXIT_INCOMPLETE = 2
 
@@ -374,7 +374,7 @@ def main(
     except (GitHubError, ValueError, yq.ParserUnavailable) as exc:
         print(f"::error::missed: cannot read any workflow of {args.repo}: {exc}")
         return EXIT_INCOMPLETE
-    report = check(args.repo, documents, now or datetime.now(UTC), records)
+    report = missed_slots(args.repo, documents, now or datetime.now(UTC), records)
     for workflow_file, reason in sorted(unparsed.items()):
         print(f"::error::{workflow_file}: not read, not judged: {reason}")
     for workflow_file, reason in report.unreadable:

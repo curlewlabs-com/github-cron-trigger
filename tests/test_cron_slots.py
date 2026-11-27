@@ -415,7 +415,7 @@ class ScheduleShapeTest(unittest.TestCase):
 
 
 class SlotsBetweenTest(unittest.TestCase):
-    """The freshness check walks every due slot of a line in its window, so a
+    """The missed-slot report walks every due slot of a line in its window, so a
     slot left out here is one no missed-slot report can ever name."""
 
     def test_daily_line_over_a_week(self) -> None:
