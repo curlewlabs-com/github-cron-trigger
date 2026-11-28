@@ -116,6 +116,20 @@ class ProblemsTest(unittest.TestCase):
         (problem,) = problems({"backup.yml": macro})
         self.assertTrue(problem.startswith("backup.yml: cron '@daily'"), problem)
 
+    def test_a_caller_of_a_slot_workflow_is_held_to_its_rules(self) -> None:
+        # The caller's backstop run is the one the called slot step refuses,
+        # so the problem is the caller's, read from the same directory.
+        shared = (
+            "name: Shared slot\non:\n  workflow_call:\njobs:\n  slot:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n" + SLOT_STEP
+        )
+        call = "      - run: echo\n  slot:\n    uses: ./.github/workflows/shared.yml\n"
+        hourly = workflow("probe.yml", ["17 * * * *"], True, call)
+        (problem,) = problems({"probe.yml": hourly, "shared.yml": shared})
+        self.assertIn("probe.yml: runs the slot action", problem)
+        daily = workflow("probe.yml", ["17 3 * * *"], True, call)
+        self.assertEqual(problems({"probe.yml": daily, "shared.yml": shared}), [])
+
     def test_a_chain_off_a_split_parent_is_named(self) -> None:
         # The split gives the parent one line per instant, and a chained run
         # cannot tell which of them fired its parent.
