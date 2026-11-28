@@ -10,11 +10,12 @@ line's due slots and names the gaps.
 
 What counts, and why each bound:
 
-- A workflow is checked when it runs the slot action itself
-  (clock.uses_slot_action), since only those record: on each line it is
-  enrolled for (clock.scheduled_workflow), and, when it chains through
-  `workflow_run`, on each enrolled parent's line, which is the line its
-  chained records are keyed by (the README's "Chained workflows"). A line
+- A workflow is checked when it runs the slot action, itself or in a
+  reusable workflow of the repository it calls (clock.uses_slot_action),
+  since only those record: on each line it is enrolled for
+  (clock.scheduled_workflow), and, when it chains through `workflow_run`, on
+  each enrolled parent's line, which is the line its chained records are
+  keyed by (the README's "Chained workflows"). A line
   nothing enrolled delivers is left out even though GitHub's `schedule`
   delivery of it records: GitHub alone delivers that line, as it does every
   workflow that is not enrolled, and this report answers for the deliveries
@@ -214,12 +215,12 @@ def ledgered_lines(
     Empty for a workflow that does not run the slot action. Its own lines count
     only when it is enrolled for them; a chained line comes from a parent.
     """
-    if not uses_slot_action(document):
+    if not uses_slot_action(document, documents):
         return [], []
     candidates: list[LedgeredLine] = []
     problems: list[str] = []
     try:
-        own = scheduled_workflow(workflow_file, document)
+        own = scheduled_workflow(workflow_file, document, documents)
     except (MisconfiguredWorkflow, UnsupportedCron) as exc:
         problems.append(str(exc))
     else:

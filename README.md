@@ -203,6 +203,24 @@ actions:
 
 A later delivery then redoes only the legs whose part is missing.
 
+### In a reusable workflow
+
+The slot and done steps can live in a reusable workflow that the enrolled
+workflow calls from its own repository (`uses: ./.github/workflows/<file>`),
+so that several enrolled workflows share one definition of them. A called
+workflow runs inside its caller's run, and GitHub names the caller's file and
+commit in `GITHUB_WORKFLOW_REF` and `GITHUB_WORKFLOW_SHA` there, so the slot
+action resolves the caller's lines and both actions key the ledger by the
+caller's file name. The schedule, the enrollment and the concurrency group
+stay in the caller, and so does the record job's condition on the caller's own
+work.
+
+The check, the clock and the missed-slot report follow such a call into the
+called file, so the caller is held to the slot action's rules and its missed
+slots are reported. A workflow called from another repository runs the same
+way, but none of them can read it: its caller's lines are left to the slot
+step's own refusal at run time, and its missed slots go unreported.
+
 ## Enrolling a reconciler
 
 A workflow that reads the current state on every run and changes only what is
@@ -357,7 +375,8 @@ It names, for each file in `.github/workflows` (or the directory the
 - a file that cannot be read as one workflow;
 - in an enrolled workflow, whatever the clock refuses: a dispatch type naming
   another file, no `cron:` line, a refused line, and, when the workflow runs
-  the slot action, a line firing more than once a day;
+  the slot action (itself or in a workflow it calls, as "In a reusable
+  workflow" says), a line firing more than once a day;
 - in a workflow that runs the slot action without enrolling, a line the slot
   action refuses, since GitHub's own `schedule` still delivers it;
 - in a chained workflow that runs the slot action, a parent whose line it

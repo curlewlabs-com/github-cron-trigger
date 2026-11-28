@@ -63,9 +63,9 @@ def problems(documents: Mapping[str, object]) -> list[str]:
     the whole directory, since a chained workflow's parent is another file."""
     found: list[str] = []
     for workflow_file, document in sorted(documents.items()):
-        slot_action = uses_slot_action(document)
+        slot_action = uses_slot_action(document, documents)
         try:
-            scheduled = scheduled_workflow(workflow_file, document)
+            scheduled = scheduled_workflow(workflow_file, document, documents)
         except MisconfiguredWorkflow as exc:
             found.append(str(exc))
         except UnsupportedCron as exc:

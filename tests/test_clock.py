@@ -89,6 +89,15 @@ def enrolled_with_job(cron: str, uses: str) -> str:
     )
 
 
+def enrolled_called(cron: str, uses: str) -> str:
+    """An enrolled x.yml firing on `cron`, with one job that calls `uses`."""
+    return (
+        f'name: X\non:\n  schedule:\n    - cron: "{cron}"\n'
+        "  repository_dispatch:\n    types: [github-cron-trigger/x.yml]\n"
+        f"jobs:\n  slot:\n    uses: {uses}\n"
+    )
+
+
 class EnrollmentTest(unittest.TestCase):
     def test_enrolled_by_declaring_its_own_dispatch_type(self) -> None:
         documents = parsed({"backup.yml": ENROLLED})
@@ -175,6 +184,61 @@ class EnrollmentTest(unittest.TestCase):
         workflow = scheduled_workflow("x.yml", parsed({"x.yml": text})["x.yml"])
         assert workflow is not None
         self.assertTrue(workflow.enrolled)
+
+    def test_a_slot_action_in_a_called_workflow_counts_as_the_callers(
+        self,
+    ) -> None:
+        # A called workflow's steps run in the caller's run and read the
+        # caller's file, so a slot action there resolves the caller's lines and
+        # fails the caller's backstop run of a line firing more than daily.
+        shared = (
+            "name: Shared slot\non:\n  workflow_call:\njobs:\n  slot:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: curlewlabs-com/github-cron-trigger/slot@v1\n"
+        )
+        hourly = enrolled_called("7 * * * *", "./.github/workflows/shared.yml")
+        documents = parsed({"x.yml": hourly, "shared.yml": shared})
+        with self.assertRaises(MisconfiguredWorkflow):
+            scheduled_workflow("x.yml", documents["x.yml"], documents)
+        # Without the directory there is nothing to follow the call into.
+        workflow = scheduled_workflow("x.yml", documents["x.yml"])
+        assert workflow is not None
+        self.assertTrue(workflow.enrolled)
+        # Positive control: the same caller on a daily line is enrolled.
+        daily = enrolled_called("30 19 * * *", "./.github/workflows/shared.yml")
+        documents = parsed({"x.yml": daily, "shared.yml": shared})
+        workflow = scheduled_workflow("x.yml", documents["x.yml"], documents)
+        assert workflow is not None
+        self.assertTrue(workflow.enrolled)
+
+    def test_only_a_call_into_this_repositorys_directory_is_followed(
+        self,
+    ) -> None:
+        # `documents` holds this repository's files at the commit read, which
+        # is what a local call runs; another repository's file of the same name
+        # is not the file in `documents`. A cycle of calls, which GitHub refuses
+        # to run, must still end here.
+        shared = (
+            "name: Shared slot\non:\n  workflow_call:\njobs:\n  slot:\n"
+            "    runs-on: ubuntu-latest\n    steps:\n"
+            "      - uses: curlewlabs-com/github-cron-trigger/slot@v1\n"
+        )
+        cycle = (
+            "name: Cycle\non:\n  workflow_call:\njobs:\n  back:\n"
+            "    uses: ./.github/workflows/x.yml\n"
+        )
+        for uses in (
+            "someone/elsewhere/.github/workflows/shared.yml@v1",
+            "./.github/workflows/cycle.yml",
+        ):
+            with self.subTest(uses=uses):
+                text = enrolled_called("7 * * * *", uses)
+                documents = parsed(
+                    {"x.yml": text, "shared.yml": shared, "cycle.yml": cycle}
+                )
+                workflow = scheduled_workflow("x.yml", documents["x.yml"], documents)
+                assert workflow is not None
+                self.assertFalse(workflow.schedules[0].fires_at_most_daily)
 
     def test_an_enrolled_reconciler_without_the_slot_action_may_fire_more_often(
         self,

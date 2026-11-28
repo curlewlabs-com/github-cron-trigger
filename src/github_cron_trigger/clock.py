@@ -56,6 +56,7 @@ from .cron_slots import (
 from .decoded import as_list, as_mapping
 from .github import GitHubError, check_repo, gh_api
 from .slot_ledger import cron_segment
+from .workflow_files import WORKFLOW_DIRECTORY
 from .workflow_triggers import (
     MisconfiguredWorkflow,
     dispatch_types,
@@ -65,6 +66,10 @@ from .workflow_triggers import (
 )
 
 EVENT_TYPE_PREFIX = "github-cron-trigger/"
+
+# How a job calls a reusable workflow of its own repository, at the caller's
+# commit.
+LOCAL_WORKFLOW_PREFIX = "./" + WORKFLOW_DIRECTORY + "/"
 
 # The slot action, recognized by the end of a step's `uses:` path, so the match
 # does not depend on the owner it is referenced from (a fork, or a copy vendored
@@ -81,20 +86,51 @@ class ScheduledWorkflow:
     enrolled: bool
 
 
-def uses_slot_action(document: object) -> bool:
-    """Whether a step of one of the workflow's jobs runs the slot action.
+def uses_slot_action(
+    document: object, documents: Mapping[str, object] | None = None
+) -> bool:
+    """Whether a step of one of the workflow's jobs runs the slot action, or a
+    job calls a reusable workflow of the same repository that does.
 
-    Only the workflow's own steps are read. A slot action reached through a
-    reusable workflow or another action is not seen, which leaves that
-    workflow's once-a-day rule to the slot step's own refusal at run time.
+    A job calling `./.github/workflows/<file>` is followed into `documents`, the
+    repository's parsed workflows by file name, because a called workflow's
+    steps run in the caller's run and read the caller's file: the slot action
+    there resolves the caller's lines, so the caller is the workflow that
+    records. A call to another repository's workflow is not followed, since
+    `documents` holds this repository's files only, and without `documents` no
+    call is followed. A slot action reached only that way, or through another
+    action, is not seen, which leaves that workflow's once-a-day rule to the
+    slot step's own refusal at run time.
     """
+    return _runs_slot_action(document, documents or {}, set())
+
+
+def _runs_slot_action(
+    document: object, documents: Mapping[str, object], followed: set[str]
+) -> bool:
     fields = as_mapping(document)
     jobs = as_mapping(fields.get("jobs")) if fields is not None else None
     if jobs is None:
         return False
     for job in jobs.values():
         job_fields = as_mapping(job)
-        steps = as_list(job_fields.get("steps")) if job_fields is not None else None
+        if job_fields is None:
+            continue
+        uses = job_fields.get("uses")
+        called = (
+            uses.removeprefix(LOCAL_WORKFLOW_PREFIX)
+            if isinstance(uses, str) and uses.startswith(LOCAL_WORKFLOW_PREFIX)
+            else None
+        )
+        # `documents` holds only the files GitHub runs, so the lookup is what
+        # refuses a path it would not. `followed` because a cycle of calls is
+        # one GitHub refuses to run but a file on a branch can still hold, and
+        # reading it must end.
+        if called is not None and called not in followed and called in documents:
+            followed.add(called)
+            if _runs_slot_action(documents[called], documents, followed):
+                return True
+        steps = as_list(job_fields.get("steps"))
         if steps is None:
             continue
         for step in steps:
@@ -126,7 +162,9 @@ def frequent_line_problem(
 
 
 def scheduled_workflow(
-    workflow_file: str, document: object
+    workflow_file: str,
+    document: object,
+    documents: Mapping[str, object] | None = None,
 ) -> ScheduledWorkflow | None:
     """The workflow's cron lines and enrollment, or None when the clock has
     nothing to track for it.
@@ -167,7 +205,7 @@ def scheduled_workflow(
         raise MisconfiguredWorkflow(
             f"{workflow_file}: enrolled as {own_type!r} but declares no cron: line"
         )
-    if enrolled and uses_slot_action(document):
+    if enrolled and uses_slot_action(document, documents):
         problem = frequent_line_problem(workflow_file, schedules)
         if problem is not None:
             raise MisconfiguredWorkflow(problem)
@@ -319,7 +357,7 @@ def tick(
     unjudged = set(unreadable)
     for workflow_file, document in sorted(documents.items()):
         try:
-            workflow = scheduled_workflow(workflow_file, document)
+            workflow = scheduled_workflow(workflow_file, document, documents)
         except (MisconfiguredWorkflow, UnsupportedCron) as exc:
             problems.append(str(exc))
             unjudged.add(workflow_file)

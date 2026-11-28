@@ -182,6 +182,25 @@ class LedgeredLinesTest(unittest.TestCase):
             ledgered_lines("backup.yml", document(slot_action=False), {}), ([], [])
         )
 
+    def test_a_workflow_calling_the_slot_action_is_checked(self) -> None:
+        # A called workflow's slot and done steps read the caller's file, so
+        # the records are the caller's and so is the line they are checked on.
+        caller = document(slot_action=False)
+        caller["jobs"] = {"slot": {"uses": "./.github/workflows/shared-slot.yml"}}
+        shared = {
+            "on": {"workflow_call": None},
+            "jobs": {"slot": {"steps": [{"uses": SLOT_ACTION}]}},
+        }
+        documents = {"backup.yml": caller, "shared-slot.yml": shared}
+        lines, problems = ledgered_lines("backup.yml", caller, documents)
+        self.assertEqual(
+            [(line.schedule.canonical, line.delivered_by) for line in lines],
+            [("30 19 * * *", "backup.yml")],
+        )
+        self.assertEqual(problems, [])
+        # The called workflow carries no line of its own and records none.
+        self.assertEqual(ledgered_lines("shared-slot.yml", shared, documents), ([], []))
+
     def test_a_chained_workflow_is_checked_on_its_parents_line(self) -> None:
         # The audit's records are keyed by the backup's line, under the audit's
         # own file: that line is the one to check them against.
